@@ -1,1 +1,98 @@
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.integrate import solve_ivp
 
+# These masses represent the Earth-Moon system
+m_1 = 5.974e24  # kg
+m_2 = 7.348e22  # kg
+pi_2 = m_2 / (m_1 + m_2)
+
+#initial values
+x_0 = 1 - pi_2
+y_0 = 0.0455
+z_0 = 0
+vx_0 = -0.5
+vy_0 = 0.5
+vz_0 = 0
+
+# Then stack everything together into the state vector
+r_0 = np.array((x_0, y_0, z_0))
+v_0 = np.array((vx_0, vy_0, vz_0))
+Y_0 = np.hstack((r_0, v_0))
+
+#find velocity and acceleration at points, given position and velocity
+def nondim_cr3bp(t, Y):
+    """Solve the CR3BP in nondimensional coordinates.
+
+    The state vector is Y, with the first three components as the
+    position of $m$, and the second three components its velocity.
+
+    The solution is parameterized on $\\pi_2$, the mass ratio.
+    """
+    # Get the position and velocity from the solution vector
+    x, y, z = Y[:3]
+    xdot, ydot, zdot = Y[3:]
+
+    # Define the derivative vector
+    Ydot = np.zeros_like(Y)
+    Ydot[:3] = Y[3:]
+
+    sigma = np.sqrt(np.sum(np.square([x + pi_2, y, z])))
+    psi = np.sqrt(np.sum(np.square([x - 1 + pi_2, y, z])))
+    Ydot[3] = (
+        2 * ydot
+        + x
+        - (1 - pi_2) * (x + pi_2) / sigma**3
+        - pi_2 * (x - 1 + pi_2) / psi**3
+    )
+    Ydot[4] = -2 * xdot + y - (1 - pi_2) * y / sigma**3 - pi_2 * y / psi**3
+    Ydot[5] = -(1 - pi_2) / sigma**3 * z - pi_2 / psi**3 * z
+    return Ydot
+
+# solve_ivp determines the necessary time interval to stay within an error margin
+t_0 = 0  # nondimensional time
+t_f = 20  # nondimensional time
+t_points = np.linspace(t_0, t_f, 1000)
+sol = solve_ivp(nondim_cr3bp, [t_0, t_f], Y_0, t_eval=t_points)
+
+Y = sol.y.T
+r = Y[:, :3]  # nondimensional distance
+v = Y[:, 3:]  # nondimensional velocity
+
+x_2 = (1 - pi_2) * np.cos(np.linspace(0, np.pi, 100))
+y_2 = (1 - pi_2) * np.sin(np.linspace(0, np.pi, 100))
+fig, ax = plt.subplots(figsize=(5, 5), dpi=96)
+
+# Plot the orbits
+ax.plot(r[:, 0], r[:, 1], "r", label="Trajectory")
+ax.axhline(0, color="k")
+ax.plot(np.hstack((x_2, x_2[::-1])), np.hstack((y_2, -y_2[::-1])))
+ax.plot(-pi_2, 0, "bo", label="$m_1$")
+ax.plot(1 - pi_2, 0, "go", label="$m_2$")
+ax.plot(x_0, y_0, "ro")
+ax.set_aspect("equal")
+
+###################################################
+
+# Re-solve with tighter tolerances
+sol_hp = solve_ivp(nondim_cr3bp, [t_0, t_f], Y_0,
+                   atol=1e-9, rtol=1e-6, t_eval=t_points)
+r_hp = sol_hp.y.T[:, :3]   # positions from the accurate run
+
+# Plot both trajectories together
+fig, ax = plt.subplots(figsize=(6, 6), dpi=96)
+ax.plot(r[:, 0], r[:, 1], "C2", label="Original (default tolerances)")
+ax.plot(r_hp[:, 0], r_hp[:, 1], "r", label="Accurate (tight tolerances)")
+
+# Moon's orbit, Earth, Moon, and starting point
+ax.plot(np.hstack((x_2, x_2[::-1])), np.hstack((y_2, -y_2[::-1])), "C0", lw=0.8)
+ax.plot(-pi_2, 0, "bo", label="Earth")
+ax.plot(1 - pi_2, 0, "go", label="Moon")
+ax.plot(x_0, y_0, "ko", label="Start")
+
+ax.axhline(0, color="k", lw=0.5)
+ax.set_aspect("equal")
+ax.legend(loc="upper right", fontsize=8)
+ax.set_xlabel("x*")
+ax.set_ylabel("y*")
+plt.show()
