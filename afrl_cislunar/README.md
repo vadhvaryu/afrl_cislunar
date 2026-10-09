@@ -9,6 +9,7 @@ Right now we're on the initial simulation build using the CR3BP (circular restri
 - `cr3bp.py` - shared CR3BP equations of motion, Jacobi constant, and state transition matrix (STM). Import from here instead of copying them into scripts.
 - `weber_cr3bp_example.py` - CR3BP example from orbital-mechanics.space. Shows why tight solver tolerances matter.
 - `artemis2_vs_cr3bp.py` - starts the CR3BP from Orion's real state after TLI and compares it to NASA's actual Artemis II trajectory.
+- `obs_generator.py` - makes fake telescope observations (RA/Dec angles with noise) of a cislunar orbit for testing IOD. Writes `data/synthetic_obs.csv` (IOD input) and `data/synthetic_truth.csv` (answer key).
 - `stm_check.py` - checks the STM against brute-force re-propagation and shows how a small starting error grows along an Artemis-like path. Doesn't need the NASA file.
 
 ## Running
