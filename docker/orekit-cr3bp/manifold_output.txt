@@ -1,0 +1,12 @@
+          Transfer from Earth-Moon L2 Halo Orbit to High Lunar Orbit using unstable manifolds
+
+Distance between the spacecraft and the Moon after Transfer: 9993915.245659074 meters
+
+Spacecraft velocity after transfer: {-850.2911114203; -106.0945980653; 172.8933016228} m/s
+Spacecraft velocity after Lunar orbit insertion manoeuver: {-763.7275519465; 0; 0} m/s
+
+Initial Position: {429,752,618.5198784; 0; -6,973,938.87483004}
+Position before Transfer: {430,637,839.6111023; -23,406,405.22848125; -4,366,519.450577038}
+Position after Transfer: {379,729,315.3582433; 9,872,774.871174132; -1,551,340.8008975547}
+Position after first Moon captured half orbit: {379,729,315.3582433; -17,861,083.916632354; 2,727,498.4222316407}
+Position after first Moon captured full orbit: {379,729,315.35824317; 9,947,319.720184676; -1,423,583.6414984514}

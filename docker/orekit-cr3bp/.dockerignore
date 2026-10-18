@@ -1,0 +1,4 @@
+**/.git
+orekit-tutorials/target
+orekit-tutorials/.idea
+orekit-tutorials/*.iml
