@@ -1,0 +1,42 @@
+# Scenario for the IOD -> estimation -> propagation -> results stack.
+# Swap a module by changing one name below (or with --iod / --propagator).
+# Each module ignores settings meant for other modules.
+
+system:                 # must match obs_generator.py
+  mu: 0.0121505
+  du_km: 384338.0
+  tu_s: 375099.0
+
+data:
+  observations: data/synthetic_obs.csv
+  truth: data/synthetic_truth.csv      # answer key; remove for real data
+
+iod:
+  method: truth_plus_error             # truth_plus_error (test stand-in) | gooding | gauss | laplace
+
+  # gooding / gauss / laplace (Orekit, two-body)
+  obs_indices: [0, 2, 4]               # which 3 observations to use
+  range_guess_km: [350000, 350000]     # gooding only: guessed distance at obs 1 and 3
+
+  # truth_plus_error (reads the answer key; for testing the rest of the stack only)
+  epoch_index: 2                       # which observation time the estimate is at
+  position_error_km: 1000
+  velocity_error_m_s: 10
+  seed: 0
+
+estimation:
+  method: orekit_bls                   # orekit_bls | none
+  max_iterations: 50
+  max_evaluations: 100
+  convergence_threshold: 0.001         # Orekit's normalized-parameter convergence threshold
+
+propagator:
+  method: orekit_cr3bp                 # orekit_cr3bp | cr3bp | keplerian
+
+output:
+  dir: results
+  dense_points: 800
+
+orekit:
+  data_path: null                      # path to orekit-data (needed by orekit_bls),
+                                       # or leave null and set the OREKIT_DATA environment variable
