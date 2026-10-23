@@ -18,8 +18,9 @@ Put `od_stack/`, `tests/`, `config.yaml` and `requirements.txt` in the same fold
 ```
 pip install -r requirements.txt       # orekit-jpype also needs Java (JDK 11+)
 export OREKIT_DATA=~/halo-docker/orekit-data   # or set orekit.data_path in config.yaml
-python -m pytest -q                   # 8 tests, all should pass
-python -m od_stack.run                # writes results/results.png, summary.json, trajectory_comparison.csv
+python -m pytest -q                   # 14 tests, all should pass
+python -m od_stack.run                # writes results/: summary.json, CSVs, results/residuals/uncertainty.png
+python -m od_stack.sweep              # Monte Carlo noise + IOD-error sweeps -> results/sweeps/ (~20 min)
 ```
 
 On Windows PowerShell use `$env:OREKIT_DATA="C:\path\to\orekit-data"` instead of `export`.
@@ -32,6 +33,8 @@ python -m od_stack.run --estimation none      # skip BLS, propagate the IOD stat
 python -m od_stack.run --propagator cr3bp     # scipy CR3BP instead of Orekit
 python -m od_stack.run --iod gooding
 python -m od_stack.run --compare-iod          # every IOD method in one table
+python -m od_stack.sweep noise --seeds 3      # quick noise sweep
+python -m od_stack.sweep iod-error --errors 1000 10000 30000
 ```
 
 ## Conventions (every module uses these)
@@ -57,7 +60,8 @@ Data contracts: `od_stack/contracts.py`.
 | Propagator | `orekit_cr3bp` | Orekit numerical propagator: Earth gravity + a Moon moving on the CR3BP circle. Same physics as the truth (verified to < 10 m over 8 days), and the same model BLS fits with. |
 | Propagator | `cr3bp` | The same CR3BP in scipy (independent check). |
 | Propagator | `keplerian` | Two-body baseline. |
-| Results | — | Error vs truth over time, rotating-frame plots, CSV and JSON. `summary.json` includes the 6×6 covariance. |
+| Results | — | Post-fit residuals, covariance carried over the span (sigma points through the chosen propagator), 95% confidence regions, error vs truth and NEES/χ² honesty checks; CSV, JSON and three figures. Works without a truth file. Details: [`RESULTS.md`](RESULTS.md). |
+| Sweeps | `sweeps:` | `python -m od_stack.sweep`: Monte Carlo over angle noise and IOD error with the configured modules; convergence rate, accuracy, covariance honesty. |
 
 ### How the BLS stage reproduces the CR3BP inside Orekit (`orekit_models.py`)
 

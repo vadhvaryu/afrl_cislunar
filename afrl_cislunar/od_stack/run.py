@@ -22,7 +22,7 @@ from .estimation import ESTIMATORS, EstimationFailure
 from .frames import EarthMoonSystem
 from .iod import IOD_METHODS, IODFailure
 from .propagators import PROPAGATORS
-from .results import plot, summarize, write_outputs
+from .results import report
 from .sources import dense_truth, load_synthetic_obs, load_synthetic_truth
 
 DAY = 86400.0
@@ -58,22 +58,22 @@ def run(cfg: dict, make_files: bool = True) -> dict:
     t_dense = np.linspace(obs.t.min(), obs.t.max(), n)
     est = prop.propagate(x0, t_dense)
 
-    # 5. Results (only possible when a truth file exists)
+    # 5. Results. Residuals and covariance need no truth; errors vs truth only when a truth file exists.
+    ocfg = cfg.get("output", {})
+    truth = truth_at_obs = truth_at_x0 = None
     truth_path = cfg["data"].get("truth")
-    if not truth_path:
-        return {"method": x0.method, "epoch_days": x0.t / DAY, "info": x0.info}
-    _, tru_rot, tru_tau = load_synthetic_truth(truth_path, sys)
-    truth = dense_truth(tru_rot, tru_tau, t_dense, sys)
-    summary = summarize(
-        x_iod, x0, dense_truth(tru_rot, tru_tau, np.array([x0.t]), sys), est, truth,
-        prop.propagate(x0, obs.t), dense_truth(tru_rot, tru_tau, obs.t, sys))
+    if truth_path:
+        _, tru_rot, tru_tau = load_synthetic_truth(truth_path, sys)
+        truth = dense_truth(tru_rot, tru_tau, t_dense, sys)
+        truth_at_obs = dense_truth(tru_rot, tru_tau, obs.t, sys)
+        truth_at_x0 = dense_truth(tru_rot, tru_tau, np.array([x0.t]), sys)
+    summary = report(obs, x_iod, x0, est, prop.propagate(x0, obs.t), prop, sys, truth=truth,
+                     truth_at_obs=truth_at_obs, truth_at_x0=truth_at_x0,
+                     out_dir=ocfg.get("dir", "results") if make_files else None,
+                     propagate_cov=make_files and ocfg.get("propagate_covariance", True),
+                     confidence_level=float(ocfg.get("confidence_level", 0.95)))
     summary["estimator"] = estimator.name
     summary["propagator"] = prop.name
-
-    if make_files:
-        out_dir = cfg.get("output", {}).get("dir", "results")
-        write_outputs(out_dir, summary, est, truth)
-        summary["figure"] = plot(out_dir, obs, x0, est, truth, sys)
     return summary
 
 

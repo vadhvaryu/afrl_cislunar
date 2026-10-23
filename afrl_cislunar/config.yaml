@@ -36,6 +36,20 @@ propagator:
 output:
   dir: results
   dense_points: 800
+  propagate_covariance: true           # carry the BLS covariance over the whole span (12 extra propagations)
+  confidence_level: 0.95               # size of the confidence region reported in summary.json
+
+sweeps:                                # python -m od_stack.sweep   (Monte Carlo; see od_stack/sweep.py)
+  dir: results/sweeps
+  seeds: 20                            # runs per setting
+  noise_arcsec: [0.3, 1, 3, 10, 30, 100, 300, 1000, 3000]
+  iod_position_error_km: [100, 1000, 10000, 30000, 100000]
+  velocity_per_position_error: 0.01    # m/s of IOD velocity error per km of position error (1,000 km -> 10 m/s)
+  noise_sweep_iod_error_km: 1000       # IOD error held fixed during the noise sweep
+  iod_sweep_noise_arcsec: 10           # noise held fixed during the IOD-error sweep
+  converged_if_error_below_km: 1000    # BLS "converged" = finished AND landed this close to truth ...
+  threshold_reference_noise_arcsec: 10 # ... scaled up by noise / 10" above 10" (good-fit error grows with noise)
+  check_points: 100                    # times used to measure max error over the span
 
 orekit:
   data_path: null                      # path to orekit-data (needed by orekit_bls),
