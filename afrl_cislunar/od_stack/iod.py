@@ -126,6 +126,14 @@ class OrekitLaplace(_OrekitAnglesOnlyIOD):
             dates[0], los[0], dates[1], los[1], dates[2], los[2])
 
 
+def _unit(a) -> np.ndarray:
+    a = np.asarray(a, float).reshape(3)
+    n = np.linalg.norm(a)
+    if not n > 0:
+        raise ValueError("Error direction must be a nonzero 3-vector")
+    return a / n
+
+
 class TruthPlusError:
     """TEST STAND-IN, not a real IOD method: returns the true state plus a known,
     random error. It reads the answer key, so never use it for real results.
@@ -138,7 +146,8 @@ class TruthPlusError:
     name = "truth_plus_error"
 
     def __init__(self, sys: EarthMoonSystem, truth_path: str | None = None, epoch_index: int = 2,
-                 position_error_km: float = 1000.0, velocity_error_m_s: float = 10.0, seed: int = 0, **_):
+                 position_error_km: float = 1000.0, velocity_error_m_s: float = 10.0, seed: int = 0,
+                 position_direction=None, velocity_direction=None, **_):
         if not truth_path:
             raise ValueError("truth_plus_error needs data.truth in the config")
         from .sources import load_synthetic_truth
@@ -147,6 +156,10 @@ class TruthPlusError:
         self.k = int(epoch_index)
         self.dr, self.dv = float(position_error_km) * 1e3, float(velocity_error_m_s)
         self.rng = np.random.default_rng(seed)
+        # Optional fixed error directions (3-vectors, normalized here). They replace the
+        # random draws; the draws still happen, so the other direction is unchanged.
+        self.pos_dir = None if position_direction is None else _unit(position_direction)
+        self.vel_dir = None if velocity_direction is None else _unit(velocity_direction)
 
     def _random_dir(self):
         u = self.rng.normal(size=3)
@@ -154,10 +167,13 @@ class TruthPlusError:
 
     def estimate(self, obs: Observations) -> StateEstimate:
         k = self.k
+        u_r, u_v = self._random_dir(), self._random_dir()     # always two draws, in this order
+        u_r = u_r if self.pos_dir is None else self.pos_dir
+        u_v = u_v if self.vel_dir is None else self.vel_dir
         return StateEstimate(
             t=float(self.truth.t[k]),
-            r=self.truth.r[k] + self.dr * self._random_dir(),
-            v=self.truth.v[k] + self.dv * self._random_dir(),
+            r=self.truth.r[k] + self.dr * u_r,
+            v=self.truth.v[k] + self.dv * u_v,
             method=self.name,
             info={"obs_indices": [k], "test_stand_in": True},
         )

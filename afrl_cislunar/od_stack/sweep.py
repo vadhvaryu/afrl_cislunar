@@ -92,14 +92,20 @@ class Sweeper:
         above the 10" reference level (1,000 km at 10" is ~60x the typical good-fit error)."""
         return self.ok_km * max(1.0, noise_arcsec / self.ref_noise)
 
-    def one(self, noise_arcsec: float, seed: int, iod_overrides: dict | None = None) -> dict:
+    def one(self, noise_arcsec: float, seed: int, iod_overrides: dict | None = None,
+            obs_seed: int | None = None, features=None) -> dict:
+        """One case. obs_seed picks the noise realization (default 10_000 + seed).
+        features(obs, x_iod, x0) -> dict, if given, adds columns to the row (x0 is None
+        when BLS fails); see convergence_features.py."""
         icfg = dict(self.cfg["iod"])
         icfg.update(iod_overrides or {})
         icfg.setdefault("seed", seed)
         method = icfg.pop("method")
         row = {"noise_arcsec": noise_arcsec, "seed": seed, "iod_method": method,
                "iod_position_error_km_requested": icfg.get("position_error_km") if method == "truth_plus_error" else None}
-        obs = resample_observations(self.truth_path, self.template, noise_arcsec, seed=10_000 + seed)
+        obs_seed = 10_000 + seed if obs_seed is None else int(obs_seed)
+        row["obs_seed"] = obs_seed
+        obs = resample_observations(self.truth_path, self.template, noise_arcsec, seed=obs_seed)
         t0 = time.time()
         try:
             iod = IOD_METHODS[method](self.sys, orekit_data=self.orekit_data, truth_path=self.truth_path, **icfg)
@@ -111,8 +117,11 @@ class Sweeper:
         try:
             x0 = self.estimator.refine(obs, x_iod)
         except EstimationFailure as e:
-            return {**row, "bls_finished": False, "converged": False, "seconds": time.time() - t0,
-                    "error": str(e).split(": ", 1)[-1][:120]}
+            row.update(bls_finished=False, converged=False, seconds=time.time() - t0,
+                       error=str(e).split(": ", 1)[-1][:120])
+            if features:
+                row.update(features(obs, x_iod, None))
+            return row
         tx = dense_truth(self.tru_rot, self.tru_tau, np.array([x0.t]), self.sys)
         err_km = float(np.linalg.norm(x0.r - tx.r[0]) / 1e3)
         row.update(bls_finished=True, iterations=x0.info.get("iterations"),
@@ -132,6 +141,8 @@ class Sweeper:
             row.update(nees_6d=c["nees_6d"], nees_position_3d=c["nees_position_3d"],
                        inside_95pct_6d=c["inside_95pct_ellipsoid_6d"])
         row["seconds"] = time.time() - t0
+        if features:
+            row.update(features(obs, x_iod, x0))
         return row
 
 
