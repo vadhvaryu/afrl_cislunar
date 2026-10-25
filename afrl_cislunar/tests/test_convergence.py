@@ -256,3 +256,39 @@ def test_grid_and_threshold_jobs_without_orekit():
     assert summary["smallest_failed"] - summary["threshold"] <= 250
     assert summary["n_runs"] == len(runs) and summary["monotonic_in_evaluations"]
     assert [r["bisection_step"] for r in runs] == list(range(len(runs)))
+
+
+# ----------------------------------------------------------------------------- A5: statistics
+
+from od_stack import convergence_plots as cplots                               # noqa: E402
+
+
+def test_auc_and_logistic_regression_recover_a_known_effect():
+    rng = np.random.default_rng(0)
+    n = 600
+    x_real, x_noise = rng.normal(size=n), rng.normal(size=n)
+    failed = rng.random(n) < 1 / (1 + np.exp(-(2.0 * x_real - 0.5)))
+    a = cplots.auc(x_real, failed)
+    assert 0.8 < a["auc"] < 0.95 and a["p"] < 1e-10            # failures have larger x_real
+    assert abs(cplots.auc(x_noise, failed)["auc"] - 0.5) < 0.07
+    assert cplots.auc(-x_real, failed)["auc"] == pytest.approx(1 - a["auc"])
+    rows = [{"a": u, "b": v, "failed": bool(f)} for u, v, f in zip(x_real, x_noise, failed)]
+    lg = cplots.logistic(rows, ["a", "b"], n_boot=50)
+    assert lg["coefficients"]["a"]["excludes_zero"] and lg["coefficients"]["a"]["beta"] > 1.2
+    assert not lg["coefficients"]["b"]["excludes_zero"]
+
+
+def test_non_monotonic_rates_and_thresholds():
+    def r(mode, k, d, ok):
+        return {"mode": mode, "direction": k, "size": d, "failed": not ok, "outcome": "converged" if ok else "wrong_orbit"}
+    rows = ([r("combined", 0, d, d <= 20) for d in (10, 20, 30, 40)]               # clean cliff
+            + [r("combined", 1, d, d in (10, 30)) for d in (10, 20, 30, 40)])       # fails at 20, ok at 30
+    nm = cplots.non_monotonic(rows)
+    assert nm["combined"] == {"count": 1, "of": 2, "directions": [1]}
+    assert cplots.largest_converged(rows, "combined") == {0: 20, 1: 30}
+    b = cplots.rate_by(rows, "size")
+    assert [v["converged"] for v in b] == [2, 1, 1, 0] and all(v["lo"] <= v["rate"] <= v["hi"] for v in b)
+    thr = [{"mode": "combined", "threshold": t, "censored": c, "monotonic_in_evaluations": True}
+           for t, c in ((1000.0, ""), (2000.0, ""), (100_000.0, ">= 100,000"), (np.nan, "< 500"))]
+    s = cplots.threshold_stats(thr)["combined"]
+    assert s["at_least_100000"] == 1 and s["below_500"] == 1 and s["min_km"] == 0.0 and s["max_km"] == 100_000
