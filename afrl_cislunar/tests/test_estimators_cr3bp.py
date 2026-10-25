@@ -84,3 +84,14 @@ def test_multiple_shooting_then_bls_recovers_the_truth():
     fit = ESTIMATORS["multiple_shooting_then_bls"](SYS).refine(obs, x0)
     assert np.linalg.norm(fit.r - r) / 1e3 < 5
     assert fit.info["ms_iterations"] > 0 and fit.info["bls_iterations"] > 0
+
+
+def test_propagation_stops_at_an_impact_instead_of_crawling():
+    """A state falling straight into the Moon raises quickly instead of integrating through the singularity."""
+    import time
+    from od_stack.estimators_cr3bp import _propagate_many
+    x0 = np.array([1 - SYS.mu + 5000 / SYS.du_km, 0, 0, -1.0, 0, 0])
+    t = time.time()
+    with pytest.raises(RuntimeError, match="hits"):
+        _propagate_many(x0, 0.0, np.array([0.5]), SYS.mu, stm=True)
+    assert time.time() - t < 5

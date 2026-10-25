@@ -50,8 +50,26 @@ def _wrap(a):
     return (a + np.pi) % (2 * np.pi) - np.pi
 
 
+# Surfaces of Earth and Moon in DU (for impact detection; the CR3BP is singular at the centres).
+_R_EARTH_DU, _R_MOON_DU = 6378.0 / 384338.0, 1737.4 / 384338.0
+
+
+def _impact_events(mu):
+    def earth(t, s, mu):
+        return np.sqrt((s[0] + mu) ** 2 + s[1] ** 2 + s[2] ** 2) - _R_EARTH_DU
+
+    def moon(t, s, mu):
+        return np.sqrt((s[0] - 1 + mu) ** 2 + s[1] ** 2 + s[2] ** 2) - _R_MOON_DU
+
+    earth.terminal = moon.terminal = True
+    return earth, moon
+
+
 def _propagate_many(x0, tau0, taus, mu, stm=False):
-    """States (and STMs) at taus (all on one side of tau0, sorted away from it)."""
+    """States (and STMs) at taus (all on one side of tau0, sorted away from it).
+    Raises RuntimeError if the trajectory hits the Earth or the Moon first: near the centres the
+    CR3BP is singular and the integrator would crawl with ever smaller steps (seen in practice:
+    a worker stuck for 10 minutes using 3.5 GB on a multiple-shooting iterate)."""
     taus = np.asarray(taus, float)
     if len(taus) == 0:
         return np.empty((0, 6)), np.empty((0, 6, 6))
@@ -59,7 +77,10 @@ def _propagate_many(x0, tau0, taus, mu, stm=False):
     if end == tau0:
         return np.tile(x0, (len(taus), 1)), np.tile(np.eye(6), (len(taus), 1, 1))
     y0 = np.concatenate([x0, np.eye(6).ravel()]) if stm else np.asarray(x0, float)
-    sol = solve_ivp(_eom_stm if stm else cr3bp_eom, [tau0, end], y0, args=(mu,), dense_output=True, **TOL)
+    sol = solve_ivp(_eom_stm if stm else cr3bp_eom, [tau0, end], y0, args=(mu,), dense_output=True,
+                    events=_impact_events(mu), **TOL)
+    if sol.status == 1:
+        raise RuntimeError("trajectory hits the Earth or the Moon")
     if not sol.success:
         raise RuntimeError(sol.message)
     Y = sol.sol(taus).T
