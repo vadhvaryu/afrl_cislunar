@@ -35,12 +35,15 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.stats import mannwhitneyu
 
+from .convergence import gated_outcome
 from .sweep import _wilson
 
-OUT_DIR = "results/convergence"
+OUT_DIR = "results/convergence/orekit_bls"
 OBS_SEED = 10_000
-COLORS = {"converged": "#004B8D", "iteration_limit": "#E69F00", "wrong_orbit": "#D55E00", "other_error": "#808F9C"}
-LABELS = {"converged": "Converged", "iteration_limit": "Iteration limit", "wrong_orbit": "Wrong orbit",
+COLORS = {"converged": "#004B8D", "iteration_limit": "#E69F00", "wrong_orbit": "#D55E00",
+          "wrong_orbit_rejected": "#CC79A7", "good_fit_rejected": "#56B4E9", "other_error": "#808F9C"}
+LABELS = {"converged": "Converged", "iteration_limit": "Iteration limit", "wrong_orbit": "Wrong orbit (passed gate)",
+          "wrong_orbit_rejected": "Wrong orbit (caught by 3σ gate)", "good_fit_rejected": "Good fit rejected by gate",
           "other_error": "Other error"}
 MODE_LABELS = {"combined": "Combined (d km, 0.01·d m/s)", "position_only": "Position only",
                "velocity_only": "Velocity only"}
@@ -99,6 +102,10 @@ def load(path: str) -> list[dict]:
         s = r.get("start_residual_rms_sigma", np.nan)
         r["log_start_residual"] = np.log10(s) if isinstance(s, float) and s > 0 else np.nan
         r["log_size"] = np.log10(r["size"]) if r.get("size", 0) > 0 else np.nan
+        if "outcome" in r and "bls_finished" in r:      # (re)apply the residual gate; older CSVs lack it
+            r.setdefault("outcome_ungated", r["outcome"])
+            r["outcome"] = gated_outcome({**r, "rms_normalized_residual": (None if not isinstance(
+                r.get("rms_normalized_residual"), float) else r["rms_normalized_residual"])})
         r["failed"] = r.get("outcome") != "converged"
         r["final_error_shown_km"] = (r.get("position_error_km") if r.get("bls_finished") is True
                                      else r.get("final_state_error_km", np.nan))
@@ -459,6 +466,13 @@ def analyze(out_dir: str = OUT_DIR) -> dict:
     res["curve"] = {m: rate_by(sel(grid, mode=m), "size") for m in ("combined", "position_only", "velocity_only")}
     res["outcomes"] = {m: {o: sum(r["outcome"] == o for r in sel(grid, mode=m)) for o in COLORS}
                        for m in ("combined", "position_only", "velocity_only")}
+    fin = [r for r in all_grid + thr_runs if r.get("bls_finished") is True]
+    res["gate"] = {"finished_fits": len(fin),
+                   "wrong_orbit_caught": sum(r["outcome"] == "wrong_orbit_rejected" for r in fin),
+                   "wrong_orbit_passed": sum(r["outcome"] == "wrong_orbit" for r in fin),
+                   "good_fit_rejected": sum(r["outcome"] == "good_fit_rejected" for r in fin),
+                   "max_rms_of_converged": max([r["rms_normalized_residual"] for r in fin
+                                                if r["outcome"] == "converged"] or [np.nan])}
     res["non_monotonic"] = non_monotonic(grid)
     res["robustness"] = robustness(all_grid)
 
@@ -527,6 +541,12 @@ def tables_markdown(res) -> str:
                 "| Variable | β | 95% bootstrap interval | Excludes 0 |", "|---|---|---|---|"]
         for k, c in lg["coefficients"].items():
             out.append(f"| {k} | {c['beta']:+.2f} | {c['lo']:+.2f} to {c['hi']:+.2f} | {'yes' if c['excludes_zero'] else 'no'} |")
+    g = res.get("gate", {})
+    if g:
+        out += ["", "## Residual gate (finished fits with RMS > 3σ count as failed)\n",
+                f"{g['finished_fits']} finished fits: {g['wrong_orbit_caught']} wrong orbits caught, "
+                f"{g['wrong_orbit_passed']} wrong orbits passed the gate, {g['good_fit_rejected']} good fits rejected. "
+                f"Largest RMS of a converged fit: {g['max_rms_of_converged']:.2f}σ."]
     out += ["", "## Non-monotonic directions on the grid\n"]
     for m, v in res["non_monotonic"].items():
         out.append(f"- {m}: {v['count']} of {v['of']} ({v['directions']})")

@@ -292,3 +292,14 @@ def test_non_monotonic_rates_and_thresholds():
            for t, c in ((1000.0, ""), (2000.0, ""), (100_000.0, ">= 100,000"), (np.nan, "< 500"))]
     s = cplots.threshold_stats(thr)["combined"]
     assert s["at_least_100000"] == 1 and s["below_500"] == 1 and s["min_km"] == 0.0 and s["max_km"] == 100_000
+
+
+def test_residual_gate():
+    g = conv.gated_outcome
+    assert g({"bls_finished": True, "converged": True, "rms_normalized_residual": 0.6}) == "converged"
+    assert g({"bls_finished": True, "converged": False, "rms_normalized_residual": 1638.1}) == "wrong_orbit_rejected"
+    assert g({"bls_finished": True, "converged": False, "rms_normalized_residual": 1.2}) == "wrong_orbit"
+    assert g({"bls_finished": True, "converged": True, "rms_normalized_residual": 3.5}) == "good_fit_rejected"
+    assert g({"bls_finished": True, "converged": True, "rms_normalized_residual": float("nan")}) == "good_fit_rejected"
+    assert g({"bls_finished": True, "converged": True, "rms_normalized_residual": None}) == "converged"  # no BLS
+    assert g({"bls_finished": False, "error": "maximal count (50) exceeded"}) == "iteration_limit"

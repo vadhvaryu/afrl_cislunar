@@ -6,6 +6,7 @@ converging, and why?
     python -m od_stack.convergence grid               # A2: fine grid + noise robustness check
     python -m od_stack.convergence thresholds         # A3: bisected threshold per direction
     python -m od_stack.convergence grid --workers 3 --dirs 0 1 2
+    python -m od_stack.convergence grid --estimation orekit_bls_robust    # same grid, other estimator
 
 Every case uses the configured stack (config.yaml: truth_plus_error -> orekit_bls ->
 orekit_cr3bp) with the stand-in IOD's error set explicitly:
@@ -18,8 +19,10 @@ orekit_cr3bp) with the stand-in IOD's error set explicitly:
                      velocity_only  position 0,    velocity w m/s
     noise            10", one fixed realization obs_seed = 10_000 for every case (so only the
                      IOD error changes), except the robustness check (obs seeds 10_000-10_004)
+    outcome          gated: a finished fit with residual RMS > 3 sigma counts as failed
+                     (outcome_ungated keeps the plain category)
 
-Outputs in results/convergence/ (resumable; rerun the same command to continue):
+Outputs in results/convergence/<estimator>/ (resumable; rerun the same command to continue):
     grid.csv               one row per run (A2), with every variable from convergence_features
     thresholds.csv         one row per (mode, direction): threshold, smallest failure, evaluations
     thresholds_runs.csv    every run made inside the bisections, with all variables
@@ -38,9 +41,11 @@ import numpy as np
 import yaml
 
 from . import parallel
+from .convergence_features import outcome_category
 from .run import load_config
 
-OUT_DIR = "results/convergence"
+OUT_DIR = "results/convergence"      # + /<estimator>, e.g. results/convergence/orekit_bls
+GATE_RMS = 3.0                        # a finished fit with residual RMS above this (in sigma) counts as failed
 NOISE_ARCSEC = 10.0
 OBS_SEED = 10_000
 VEL_PER_KM = 0.01                     # combined mode: m/s of velocity error per km of position error
@@ -85,8 +90,6 @@ def init_worker(cfg: dict) -> None:
 
 
 def run_case(mode: str, size: float, k: int, obs_seed: int) -> dict:
-    from .convergence_features import outcome_category
-
     sw, fc = parallel.WORKER["sweeper"], parallel.WORKER["features"]
     d_km, w = errors_for(mode, size)
     u_r, u_v = directions(k)
@@ -100,8 +103,21 @@ def run_case(mode: str, size: float, k: int, obs_seed: int) -> dict:
     out = sw.one(NOISE_ARCSEC, int(k), ov, obs_seed=int(obs_seed), features=fc)
     out.pop("seed", None)                         # = direction
     row.update(out)
-    row["outcome"] = outcome_category(row)
+    row["estimator"] = sw.estimator.name
+    row["outcome_ungated"] = outcome_category(row)
+    row["outcome"] = gated_outcome(row)
     return row
+
+
+def gated_outcome(row: dict) -> str:
+    """Outcome with the residual gate: a finished fit whose residual RMS is above GATE_RMS
+    sigma is a failure ('wrong_orbit_rejected'), or a false rejection if it was in fact
+    close to the truth ('good_fit_rejected'). Other outcomes are unchanged."""
+    ungated = outcome_category(row)
+    rms = row.get("rms_normalized_residual")
+    if row.get("bls_finished") and rms is not None and not rms <= GATE_RMS:
+        return "good_fit_rejected" if ungated == "converged" else "wrong_orbit_rejected"
+    return ungated
 
 
 def grid_job(job: dict) -> dict:
@@ -198,18 +214,23 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Convergence study: where and why BLS stops converging")
     ap.add_argument("which", choices=["pilot", "grid", "robustness", "thresholds", "all"])
     ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--out", default=OUT_DIR)
+    ap.add_argument("--out", help=f"default: {OUT_DIR}/<estimator>")
+    ap.add_argument("--estimation", help="override estimation.method (default: config.yaml)")
     ap.add_argument("--workers", type=int, help="default: cpu_count - 1")
     ap.add_argument("--dirs", type=int, nargs="+", help="override the direction ids")
     a = ap.parse_args(argv)
 
     cfg = load_config(a.config)
+    if a.estimation:
+        cfg["estimation"] = {**(cfg.get("estimation") or {}), "method": a.estimation}
+    a.out = a.out or os.path.join(OUT_DIR, cfg["estimation"]["method"])
     if cfg["iod"]["method"] != "truth_plus_error":
         raise SystemExit("The convergence study sets the IOD error, so iod.method must be truth_plus_error")
     os.makedirs(a.out, exist_ok=True)
     with open(os.path.join(a.out, "config_used.yaml"), "w") as f:
         yaml.safe_dump({**copy.deepcopy(cfg), "convergence": {
             "noise_arcsec": NOISE_ARCSEC, "obs_seed": OBS_SEED, "velocity_m_s_per_km": VEL_PER_KM,
+            "gate_rms_sigma": GATE_RMS,
             "grid_km": GRID_KM, "grid_m_s": GRID_M_S}}, f, sort_keys=False)
 
     if a.which == "pilot":
