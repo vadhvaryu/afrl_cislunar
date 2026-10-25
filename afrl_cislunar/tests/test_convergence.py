@@ -182,3 +182,77 @@ def test_final_state_and_outcome_categories():
     assert outcome_category({"converged": False, "bls_finished": True}) == "wrong_orbit"
     assert outcome_category({"bls_finished": False, "error": "maximal count (50) exceeded"}) == "iteration_limit"
     assert outcome_category({"bls_finished": False, "error": "something else"}) == "other_error"
+
+
+# ----------------------------------------------------------------------------- A0: parallel runner
+
+from od_stack import parallel                                                   # noqa: E402
+
+
+def _dummy_init(tag):
+    parallel.WORKER["tag"] = tag
+
+
+def _dummy_work(job):
+    if job["i"] == 3:
+        raise ValueError("boom")
+    row = {**job, "tag": parallel.WORKER["tag"], "sq": job["i"] ** 2}
+    if job["i"] == 5:
+        row["late_column"] = "x"                  # forces a header rewrite
+    return row, [{**job, "step": s} for s in range(2)]
+
+
+def test_parallel_runner_streams_resumes_and_survives_errors(tmp_path):
+    path, extra = str(tmp_path / "runs.csv"), str(tmp_path / "steps.csv")
+    jobs = [{"i": i, "mode": "m"} for i in range(8)]
+    kw = dict(key=("mode", "i"), work=_dummy_work, init=_dummy_init, init_args=("w",), workers=2,
+              extra_csv_path=extra)
+    rows = parallel.run_jobs(jobs[:6], path, **kw)
+    assert sorted(int(r["i"]) for r in rows) == list(range(6))
+    bad = [r for r in rows if r["i"] == "3"][0]
+    assert bad["outcome"] == "other_error" and "boom" in bad["error"]
+    good = [r for r in rows if r["i"] == "4"][0]
+    assert good["tag"] == "w" and good["sq"] == "16" and "late_column" in good
+    assert len(parallel.read_rows(extra)) == 2 * 5             # the failed job wrote no extras
+
+    # An orphan extra row (its job never finished) is dropped on resume, not duplicated.
+    parallel.CsvAppender(extra).append([{"i": 7, "mode": "m", "step": 0}])
+    rows = parallel.run_jobs(jobs, path, **kw)                  # resume: only jobs 6 and 7 run
+    assert sorted(int(r["i"]) for r in rows) == list(range(8))
+    steps = parallel.read_rows(extra)
+    assert len(steps) == 2 * 7 and sum(r["i"] == "7" for r in steps) == 2
+    assert parallel.job_key({"i": 7.0, "mode": "m"}, ("mode", "i")) == parallel.job_key({"i": "7", "mode": "m"}, ("mode", "i"))
+
+
+# ----------------------------------------------------------------------------- A2/A3 driver
+
+from od_stack import convergence as conv                                       # noqa: E402
+
+
+def test_grid_sizes_and_directions_match_the_brief():
+    assert len(conv.GRID_KM) == 36 and len(conv.GRID_M_S) == 15
+    assert len(conv.grid_jobs()) == (36 * 2 + 15) * 50
+    u_r, u_v = conv.directions(2)
+    rng = np.random.default_rng(2)
+    a, b = rng.normal(size=3), rng.normal(size=3)
+    assert np.allclose(u_r, a / np.linalg.norm(a)) and np.allclose(u_v, b / np.linalg.norm(b))
+    assert conv.errors_for("combined", 20_000) == (20_000.0, 200.0)
+    assert conv.errors_for("position_only", 20_000) == (20_000.0, 0.0)
+    assert conv.errors_for("velocity_only", 150) == (0.0, 150.0)
+
+
+def test_grid_and_threshold_jobs_without_orekit():
+    """With estimation 'none' the final error equals the IOD error, so 'converged' means
+    d < 1,000 km exactly, and the bisection must bracket 1,000 km to within 250 km."""
+    conv.init_worker(_no_orekit_cfg())
+    row = conv.grid_job({"mode": "combined", "size": 500.0, "direction": 4, "obs_seed": 10_000})
+    assert row["outcome"] == "converged" and row["position_error_km"] == pytest.approx(500, abs=1e-3)
+    assert row["pos_dir_x"] == pytest.approx(conv.directions(4)[0][0])
+    assert "peri_guess_8d_km" in row and row["final_state_kind"] == "solution"
+    row = conv.grid_job({"mode": "velocity_only", "size": 50.0, "direction": 4, "obs_seed": 10_000})
+    assert row["position_error_km_set"] == 0 and row["outcome"] == "converged"
+    summary, runs = conv.threshold_job({"mode": "combined", "direction": 1_000, "obs_seed": 10_000})
+    assert 750 <= summary["threshold"] < 1_000 <= summary["smallest_failed"]
+    assert summary["smallest_failed"] - summary["threshold"] <= 250
+    assert summary["n_runs"] == len(runs) and summary["monotonic_in_evaluations"]
+    assert [r["bisection_step"] for r in runs] == list(range(len(runs)))

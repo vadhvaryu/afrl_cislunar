@@ -18,7 +18,8 @@ Variables (column names in brackets):
      dense-output solution.
   2. Truth periselene over the same windows (FeatureCalculator.truth_periselene) and
      [peri_delta_8d_km, peri_delta_12d_km] = guess - truth.
-  3. Periselene of the final state [peri_final_8d_km, peri_final_12d_km, final_state_kind].
+  3. Periselene of the final state [peri_final_8d_km, peri_final_12d_km, final_state_kind,
+     final_state_error_km]. For failed BLS runs the final state is Orekit's last iterate.
   4. Position error vs the observed line of sight at obs index 2 (EMI)
      [dr_along_los_km, dr_across_los_km, angle_dr_los_deg].
   5. RIC components of dr and dv (Earth-centered, from the truth state: R = r/|r|,
@@ -219,10 +220,13 @@ class FeatureCalculator:
 
         # Where the final state (solution or last iterate) sits
         if x_final is None:
-            f.update(final_state_kind="none", peri_final_8d_km=float("nan"), peri_final_12d_km=float("nan"))
+            f.update(final_state_kind="none", final_state_error_km=float("nan"),
+                     peri_final_8d_km=float("nan"), peri_final_12d_km=float("nan"))
         else:
             pf, _ = self.periselene(x_final, "peri_final")
+            tf = self._truth_state(x_final.t)
             f.update(final_state_kind=x_final.info.get("state_kind", "solution"),
+                     final_state_error_km=float(np.linalg.norm(x_final.r - tf.r)) / 1e3,
                      peri_final_8d_km=pf["peri_final_8d_km"], peri_final_12d_km=pf["peri_final_12d_km"])
         return f
 
