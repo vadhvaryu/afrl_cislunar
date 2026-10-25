@@ -127,6 +127,8 @@ class Sweeper:
             return row
         tx = dense_truth(self.tru_rot, self.tru_tau, np.array([x0.t]), self.sys)
         err_km = float(np.linalg.norm(x0.r - tx.r[0]) / 1e3)
+        if "robust_step" in x0.info:
+            row["robust_step"] = x0.info["robust_step"]
         row.update(bls_finished=True, iterations=x0.info.get("iterations"),
                    rms_normalized_residual=x0.info.get("rms_normalized_residual"),
                    position_error_km=err_km, velocity_error_m_s=float(np.linalg.norm(x0.v - tx.v[0])),

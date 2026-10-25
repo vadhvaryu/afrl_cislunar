@@ -337,3 +337,15 @@ def test_residual_gate_option_and_robust_estimator():
     fit = OrekitBatchLSRobust(SYS).refine(obs, hard)
     assert fit.info["robust_step"] == "continuation" and fit.info["rms_normalized_residual"] < 3
     assert np.linalg.norm(fit.r - ref.r) < 1e3 and fit.cov is not None
+
+
+def test_estimator_compare_runs_and_plots_without_orekit(tmp_path):
+    from od_stack import estimator_compare as ec
+    variants = {"P0_none": {"method": "none"}, "P3_multiple_shooting": {"method": "multiple_shooting"}}
+    jobs = ec.grid_jobs(variants, [0, 1], [1_000.0, 2_000.0]) + ec.noise_jobs(variants, [10.0], range(2))
+    summ = ec.run_study(_no_orekit_cfg(), variants, jobs, str(tmp_path), workers=2)
+    g = {a["size"]: a for a in summ["grid"]["P0_none"]}
+    assert g[1_000.0]["converged"] == 0 and g[2_000.0]["converged"] == 0      # none: error = IOD error >= 1,000 km
+    assert all(a["converged"] == a["runs"] for a in summ["grid"]["P3_multiple_shooting"])
+    assert summ["noise"]["P3_multiple_shooting"][0]["runs"] == 2
+    assert len(ec.plot_a7(summ, str(tmp_path))) == 6

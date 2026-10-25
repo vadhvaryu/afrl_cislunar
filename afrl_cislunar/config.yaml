@@ -25,7 +25,7 @@ iod:
   seed: 0
 
 estimation:
-  method: orekit_bls                   # orekit_bls | orekit_bls_robust | none
+  method: orekit_bls                   # orekit_bls | orekit_bls_robust | multiple_shooting | multiple_shooting_then_bls | ukf | none
   max_iterations: 50
   max_evaluations: 100
   convergence_threshold: 0.001         # Orekit's normalized-parameter convergence threshold

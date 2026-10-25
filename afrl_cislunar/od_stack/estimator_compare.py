@@ -4,6 +4,7 @@ and is their covariance honest?
 
     python -m od_stack.estimator_compare settings        # Orekit BLS scale/threshold test
     python -m od_stack.estimator_compare settings --noise-only --best scale_1km_thr_1e-3
+    python -m od_stack.estimator_compare a7              # pipelines with and without batch least squares
 
 A "variant" is a label plus the estimation block of config.yaml (method + options). Every
 variant runs the same cases through the same stand-in IOD, noise and grading as the
@@ -39,6 +40,18 @@ SETTINGS = {f"scale_{lab}_thr_{t:g}": {"method": "orekit_bls", "position_scale_m
             for lab, sc in (("1m", 1.0), ("1km", 1e3), ("100km", 1e5)) for t in (1e-3, 1e-5)}
 SETTINGS_DIRS, SETTINGS_KM = range(0, 10), (15_000.0, 30_000.0)
 NOISE_LEVELS, NOISE_SEEDS = (0.3, 1.0), range(0, 20)
+
+# A7: pipelines with and without Orekit batch least squares
+PIPELINES = {
+    "P0_none": {"method": "none"},
+    "P1_orekit_bls": {"method": "orekit_bls"},
+    "P2_orekit_bls_robust": {"method": "orekit_bls_robust"},
+    "P3_multiple_shooting": {"method": "multiple_shooting"},
+    "P4_multiple_shooting_then_bls": {"method": "multiple_shooting_then_bls"},
+    "P5_ukf": {"method": "ukf"},
+}
+A7_DIRS, A7_KM = range(0, 50), (1_000.0, 10_000.0, 15_000.0, 20_000.0, 30_000.0, 50_000.0, 100_000.0)
+A7_NOISE, A7_SEEDS = (1.0, 10.0, 100.0), range(0, 20)
 
 
 # ----------------------------------------------------------------------------- worker side
@@ -112,8 +125,12 @@ def summarize(rows: list[dict]) -> dict:
                     "median_iterations_converged": float(np.median([_f(r, "iterations") for r in conv])) if conv else np.nan,
                     "median_seconds": float(np.median([_f(r, "seconds") for r in g])),
                     "median_error_km": float(np.median([_f(r, "position_error_km") for r in conv])) if conv else np.nan,
+                    "median_max_error_km": float(np.nanmedian([_f(r, "max_position_error_km") for r in conv])) if conv else np.nan,
+                    "mean_seconds": float(np.mean([_f(r, "seconds") for r in g])),
                     "mean_nees_6d": float(np.mean([_f(r, "nees_6d") for r in cov])) if cov else np.nan,
-                    "inside_95pct": f"{sum(r.get('inside_95pct_6d') in (True, 'True') for r in cov)}/{len(cov)}"})
+                    "inside_95pct": f"{sum(r.get('inside_95pct_6d') in (True, 'True') for r in cov)}/{len(cov)}",
+                    "inside_95pct_fraction": (sum(r.get('inside_95pct_6d') in (True, 'True') for r in cov) / len(cov)
+                                              if cov else np.nan)})
     return out
 
 
@@ -130,11 +147,13 @@ def markdown(summ: dict) -> str:
                              f"{oc} | {a['median_iterations_converged']:.0f} | {a['median_seconds']:.1f} |")
     if summ["noise"]:
         lines += ["", "## Noise (start 1,000 km / 10 m/s; NEES expect 6, inside 95% expect ~95%)\n",
-                  "| Variant | Noise (″) | Converged | Median error (km) | Mean NEES | Inside 95% |", "|---|---|---|---|---|---|"]
+                  "| Variant | Noise (″) | Converged | Median epoch error (km) | Median max error (km) | Mean NEES | "
+                  "Inside 95% | Mean s/run |", "|---|---|---|---|---|---|---|---|"]
         for v, rows in summ["noise"].items():
             for a in rows:
                 lines.append(f"| {v} | {a['noise_arcsec']:g} | {a['converged']}/{a['runs']} | {a['median_error_km']:.2f} | "
-                             f"{a['mean_nees_6d']:.1f} | {a['inside_95pct']} |")
+                             f"{a['median_max_error_km']:.1f} | {a['mean_nees_6d']:.1f} | {a['inside_95pct']} | "
+                             f"{a['mean_seconds']:.1f} |")
     return "\n".join(lines) + "\n"
 
 
@@ -144,6 +163,66 @@ def best_variant(summ: dict) -> str:
     for v, rows in summ["grid"].items():
         score[v] = (sum(a["converged"] for a in rows), -np.nanmean([a["median_iterations_converged"] for a in rows]))
     return max(score, key=score.get)
+
+
+# ----------------------------------------------------------------------------- figures (A7)
+
+def plot_a7(summ: dict, out_dir: str) -> list[str]:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.rcParams.update({"font.size": 10})
+    colors = dict(zip(PIPELINES, ["#808F9C", "#004B8D", "#56B4E9", "#D55E00", "#CC79A7", "#E69F00"]))
+    paths = []
+
+    def fig(name, title):
+        f, ax = plt.subplots(figsize=(8, 4.8), dpi=110)
+        ax.set_title(title)
+        ax.grid(alpha=0.3, which="both")
+        paths.append(os.path.join(out_dir, name))
+        return f, ax
+
+    def save(f, ax):
+        ax.legend(fontsize=8)
+        f.tight_layout()
+        f.savefig(paths[-1], bbox_inches="tight")
+        plt.close(f)
+
+    if summ["grid"]:
+        f, ax = fig("a7_convergence.png", "Convergence vs starting error (50 directions, 10″, 3σ residual gate)")
+        for v, rows in summ["grid"].items():
+            x = [a["size"] for a in rows]
+            p = np.array([a["rate"] for a in rows])
+            ax.errorbar(x, p, yerr=[p - [a["lo"] for a in rows], [a["hi"] for a in rows] - p], fmt="o-", ms=4,
+                        capsize=3, color=colors.get(v), label=v)
+        ax.set_xscale("log"); ax.set_ylim(-0.03, 1.05)
+        ax.set_xlabel("Starting position error (km), velocity 0.01 m/s per km"); ax.set_ylabel("Fraction converged (95% interval)")
+        save(f, ax)
+        f, ax = fig("a7_runtime.png", "Runtime per case vs starting error (one worker)")
+        for v, rows in summ["grid"].items():
+            ax.plot([a["size"] for a in rows], [a["mean_seconds"] for a in rows], "o-", ms=4, color=colors.get(v), label=v)
+        ax.set_xscale("log"); ax.set_yscale("log")
+        ax.set_xlabel("Starting position error (km)"); ax.set_ylabel("Mean seconds per case")
+        save(f, ax)
+    if summ["noise"]:
+        for key, name, ylab, logy, ref in (
+                ("median_error_km", "a7_epoch_error.png", "Median position error at epoch (km)", True, None),
+                ("median_max_error_km", "a7_max_error.png", "Median max position error over 8 days (km)", True, None),
+                ("mean_nees_6d", "a7_nees.png", "Mean NEES at epoch (expect 6)", True, 6.0),
+                ("inside_95pct_fraction", "a7_inside95.png", "Share of truths inside the 95% region", False, 0.95)):
+            f, ax = fig(name, f"{ylab} vs noise (start 1,000 km / 10 m/s, 20 seeds)")
+            for v, rows in summ["noise"].items():
+                ax.plot([a["noise_arcsec"] for a in rows], [a[key] for a in rows], "o-", ms=4, color=colors.get(v), label=v)
+            if ref is not None:
+                ax.axhline(ref, color="0.4", ls="--", lw=0.8)
+            ax.set_xscale("log")
+            if logy:
+                ax.set_yscale("log")
+            ax.set_xlabel("Angle noise, 1σ (arcsec)"); ax.set_ylabel(ylab)
+            save(f, ax)
+    return paths
 
 
 # ----------------------------------------------------------------------------- driver
@@ -162,7 +241,7 @@ def run_study(cfg, variants, jobs, out_dir, workers=None):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Compare estimator variants on the same cases")
-    ap.add_argument("study", choices=["settings"])
+    ap.add_argument("study", choices=["settings", "a7"])
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--workers", type=int)
     ap.add_argument("--best", help="variant for the low-noise check (default: best on the grid)")
@@ -184,6 +263,11 @@ def main(argv=None) -> int:
         summ = run_study(cfg, {**SETTINGS}, jobs + noise_jobs(pick, NOISE_LEVELS, NOISE_SEEDS), out, a.workers)
         print(markdown(summ))
         print(f"Best grid variant: {best_variant(summ) if summ['grid'] else best}")
+    if a.study == "a7":
+        jobs = grid_jobs(PIPELINES, A7_DIRS, A7_KM) + noise_jobs(PIPELINES, A7_NOISE, A7_SEEDS)
+        summ = run_study(cfg, PIPELINES, jobs, out, a.workers)
+        print(markdown(summ))
+        print("Figures:", *plot_a7(summ, out), sep="\n  ")
     return 0
 
 

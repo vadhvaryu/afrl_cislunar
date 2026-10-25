@@ -175,7 +175,8 @@ class TruthPlusError:
             r=self.truth.r[k] + self.dr * u_r,
             v=self.truth.v[k] + self.dv * u_v,
             method=self.name,
-            info={"obs_indices": [k], "test_stand_in": True},
+            info={"obs_indices": [k], "test_stand_in": True,
+                  "position_error_km_set": self.dr / 1e3, "velocity_error_m_s_set": self.dv},
         )
 
 

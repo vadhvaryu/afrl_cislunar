@@ -247,3 +247,13 @@ ESTIMATORS = {
     "orekit_bls": OrekitBatchLS,
     "orekit_bls_robust": OrekitBatchLSRobust,
 }
+
+
+# Estimators that do not use Orekit's batch least squares (they import from this module).
+from .estimators_cr3bp import CR3BPMultipleShooting, CR3BPUnscented, MultipleShootingThenBLS  # noqa: E402
+
+ESTIMATORS.update({
+    "multiple_shooting": CR3BPMultipleShooting,
+    "multiple_shooting_then_bls": MultipleShootingThenBLS,
+    "ukf": CR3BPUnscented,
+})
