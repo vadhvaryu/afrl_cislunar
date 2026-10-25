@@ -33,7 +33,8 @@ Variables (column names in brackets):
      L1 > 0.3 DU at any time. Propagation stops at an impact.
   9. Starting residuals: RA/Dec residual RMS of the guess at the observation times, in
      sigma units [start_residual_rms_sigma].
- 10. outcome_category(row): converged / iteration_limit / wrong_orbit / other_error.
+ 10. outcome_category(row): converged / iteration_limit / wrong_orbit / wrong_orbit_rejected
+     (the estimator's own residual gate rejected it) / other_error.
 """
 
 from __future__ import annotations
@@ -246,6 +247,8 @@ def outcome_category(row: dict) -> str:
         return "converged"
     if row.get("bls_finished"):
         return "wrong_orbit"
+    if "residual gate" in str(row.get("error", "")):
+        return "wrong_orbit_rejected"            # the estimator itself rejected its fit(s)
     if "maximal count" in str(row.get("error", "")):
         return "iteration_limit"
     return "other_error"

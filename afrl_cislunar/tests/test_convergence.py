@@ -303,3 +303,37 @@ def test_residual_gate():
     assert g({"bls_finished": True, "converged": True, "rms_normalized_residual": float("nan")}) == "good_fit_rejected"
     assert g({"bls_finished": True, "converged": True, "rms_normalized_residual": None}) == "converged"  # no BLS
     assert g({"bls_finished": False, "error": "maximal count (50) exceeded"}) == "iteration_limit"
+
+
+# ----------------------------------------------------------------------------- robust estimator (needs Orekit data)
+
+def _orekit_ready():
+    path = load_config(os.path.join(ROOT, "config.yaml")).get("orekit", {}).get("data_path") or os.environ.get("OREKIT_DATA")
+    if not (path and os.path.exists(os.path.expanduser(path))):
+        return False
+    try:
+        import orekit_jpype  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@pytest.mark.skipif(not _orekit_ready(), reason="needs orekit-jpype and OREKIT_DATA")
+def test_residual_gate_option_and_robust_estimator():
+    from od_stack.estimation import EstimationFailure, OrekitBatchLS, OrekitBatchLSRobust, subset
+    from od_stack.sweep import resample_observations
+
+    obs = resample_observations(TRUTH, _obs(), 10.0, 10_000)
+    assert len(subset(obs, [1, 2, 3])) == 3 and subset(obs, [1, 2, 3]).t[0] == obs.t[1]
+    easy = _guess(1000, 10)
+    with pytest.raises(EstimationFailure) as e:                    # an impossible gate rejects a good fit
+        OrekitBatchLS(SYS, gate_rms=0.01).refine(obs, easy)
+    assert "residual gate" in str(e.value) and e.value.last_state.info["state_kind"] == "rejected_fit"
+    # Direction 2 at 30,000 km: plain BLS hits the iteration limit (convergence study pilot);
+    # the robust estimator's short-arc continuation recovers the same solution plain BLS finds from 1,000 km.
+    u_r, u_v = conv.directions(2)
+    hard = _guess(30_000, 300, position_direction=u_r, velocity_direction=u_v)
+    ref = OrekitBatchLS(SYS).refine(obs, easy)
+    fit = OrekitBatchLSRobust(SYS).refine(obs, hard)
+    assert fit.info["robust_step"] == "continuation" and fit.info["rms_normalized_residual"] < 3
+    assert np.linalg.norm(fit.r - ref.r) < 1e3 and fit.cov is not None
