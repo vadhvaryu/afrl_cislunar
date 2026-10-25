@@ -14,6 +14,9 @@ Run many independent stack cases on all cores, streaming rows to a CSV that can 
   flushed as they arrive, so a crash or Ctrl-C loses only the jobs in flight. Extra rows
   of jobs that never finished are dropped on resume, so nothing is counted twice.
 - One failing job cannot kill the pool: the exception text is stored in its row.
+- A worker process that dies outright (e.g. the JVM crashing with SIGSEGV) breaks the pool; the
+  pool is then restarted and the unfinished jobs rerun (at most max_restarts times). Workers are
+  also recycled every max_tasks_per_child jobs so no JVM lives long enough to accumulate state.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import sys
 import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 
 WORKER: dict = {}          # per-process state built by the initializer
 
@@ -123,8 +127,23 @@ def _fmt_s(s: float) -> str:
 
 
 def run_jobs(jobs: list[dict], csv_path: str, key, work, init=init_sweeper, init_args=(),
-             workers: int | None = None, extra_csv_path: str | None = None, label: str = "") -> list[dict]:
+             workers: int | None = None, extra_csv_path: str | None = None, label: str = "",
+             max_restarts: int = 5, max_tasks_per_child: int = 100) -> list[dict]:
     """Run every job not already in csv_path; returns all rows of csv_path afterwards."""
+    restarts = 0
+    while True:
+        try:
+            return _run_jobs_once(jobs, csv_path, key, work, init, init_args, workers, extra_csv_path, label,
+                                  max_tasks_per_child)
+        except BrokenProcessPool:
+            restarts += 1
+            print(f"\n{label + ': ' if label else ''}a worker process died (pool broken); "
+                  f"restart {restarts}/{max_restarts}, finished rows are kept", file=sys.stderr, flush=True)
+            if restarts > max_restarts:
+                raise
+
+
+def _run_jobs_once(jobs, csv_path, key, work, init, init_args, workers, extra_csv_path, label, max_tasks_per_child):
     key = tuple(key)
     done = {job_key(r, key) for r in read_rows(csv_path)}
     if extra_csv_path:
@@ -146,7 +165,7 @@ def run_jobs(jobs: list[dict], csv_path: str, key, work, init=init_sweeper, init
     main, extra = CsvAppender(csv_path), CsvAppender(extra_csv_path) if extra_csv_path else None
     t0, n = time.time(), 0
     ex = ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn"),
-                             initializer=_init, initargs=(init, init_args))
+                             initializer=_init, initargs=(init, init_args), max_tasks_per_child=max_tasks_per_child)
     try:
         futures = [ex.submit(_run, work, j) for j in todo]
         for fut in as_completed(futures):

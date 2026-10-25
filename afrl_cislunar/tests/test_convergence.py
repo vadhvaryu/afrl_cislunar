@@ -349,3 +349,20 @@ def test_estimator_compare_runs_and_plots_without_orekit(tmp_path):
     assert all(a["converged"] == a["runs"] for a in summ["grid"]["P3_multiple_shooting"])
     assert summ["noise"]["P3_multiple_shooting"][0]["runs"] == 2
     assert len(ec.plot_a7(summ, str(tmp_path))) == 6
+
+
+def _crash_once_work(job):
+    """Kills its worker process the first time job 2 runs (marker file), like a JVM SIGSEGV."""
+    marker = job["marker"]
+    if job["i"] == 2 and not os.path.exists(marker):
+        open(marker, "w").close()
+        os._exit(11)
+    return {**job, "ok": True}
+
+
+def test_parallel_runner_restarts_after_a_worker_dies(tmp_path):
+    path = str(tmp_path / "runs.csv")
+    jobs = [{"i": i, "marker": str(tmp_path / "crashed")} for i in range(6)]
+    rows = parallel.run_jobs(jobs, path, key=("i",), work=_crash_once_work, init=_dummy_init, init_args=("w",),
+                             workers=2, max_tasks_per_child=2)
+    assert sorted(int(r["i"]) for r in rows) == list(range(6)) and all(r["ok"] == "True" for r in rows)
