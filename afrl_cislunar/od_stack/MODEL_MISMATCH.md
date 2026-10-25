@@ -78,7 +78,8 @@ Is the reported uncertainty honest? Mean NEES (expect 6):
 **What it shows**
 
 1. **The CR3BP is not usable on real-world-like data, even scaled to the real Moon.** Every CR3BP variant is
-   off by thousands of km on every orbit while reporting 2–50 km 1σ. The nominal CR3BP is 30,000 km off on the L1
+   off by thousands of km on every orbit; the plain ones (`cr3bp_nominal`, `cr3bp_epoch`) report only 2–53 km 1σ
+   while doing so. The nominal CR3BP is 30,000 km off on the L1
    halo; matching the Moon's actual distance and rate at the epoch helps (4,200 km) but is nowhere near enough.
 2. **Earth + real Moon + Sun is the minimum model.** It matches the full model to within a few km at both noise
    levels on all three orbits. Planets and Earth's J2 change nothing over 8 days (`full_no_srp` = `sun_moon`).
