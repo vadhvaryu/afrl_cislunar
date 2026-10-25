@@ -64,19 +64,23 @@ def init_worker(cfg: dict, variants: dict) -> None:
     from .convergence_features import FeatureCalculator
     from .sweep import Sweeper
 
-    parallel.WORKER["variants"] = {}
+    parallel.WORKER["variants"], parallel.WORKER["features_by_truth"] = {}, {}
     for label, est in variants.items():
+        est = dict(est)
+        data = est.pop("_data", None)                 # optional: a different truth orbit / observation file
         c = copy.deepcopy(cfg)
         c["estimation"] = {**{k: v for k, v in (cfg.get("estimation") or {}).items() if k != "method"}, **est}
-        parallel.WORKER["variants"][label] = Sweeper(c)
-    sw = next(iter(parallel.WORKER["variants"].values()))
-    parallel.WORKER["features"] = FeatureCalculator(sw.sys, sw.truth_path)
+        if data:
+            c["data"] = {**c["data"], **data}
+        sw = parallel.WORKER["variants"][label] = Sweeper(c)
+        if sw.truth_path not in parallel.WORKER["features_by_truth"]:
+            parallel.WORKER["features_by_truth"][sw.truth_path] = FeatureCalculator(sw.sys, sw.truth_path)
 
 
 def do_job(job: dict) -> dict:
     sw = parallel.WORKER["variants"][job["variant"]]
     row = run_case(job["mode"], job["size"], job["direction"], job["obs_seed"], sw=sw,
-                   noise_arcsec=job["noise_arcsec"])
+                   fc=parallel.WORKER["features_by_truth"][sw.truth_path], noise_arcsec=job["noise_arcsec"])
     row.update(variant=job["variant"], kind=job["kind"])
     return row
 
