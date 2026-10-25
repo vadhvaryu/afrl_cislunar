@@ -107,9 +107,39 @@ Spot checks so far: multiple shooting converges from both 100,000 km cases plain
 Orekit BLS's answer, and its covariance matches Orekit's to 6e-5; the UKF works from 1,000 km at 10″ but not
 from 15,000 km, and is overconfident below ~3″.
 
-## Other orbits
+## Other orbits (`od_stack/orbit_catalog.py`, `od_stack/orbit_study.py`)
 
-_Pending: six-orbit study (`od_stack/orbit_study.py`)._
+Six orbits made periodic in our CR3BP (seeds from the MIT-licensed cislunar-custody catalogue, re-corrected
+with our μ), observed with the same recipe; 20 directions × 7 starting errors, combined mode, 10″, 3σ gate.
+Converged out of 20 (`results/orbit_study/orbits_convergence.png`):
+
+| Orbit (stability index, perilune) | Estimator | 1k | 5k | 10k | 20k | 30k | 50k | 100k km |
+|---|---|---|---|---|---|---|---|---|
+| L1 halo, current truth (1, 18,749 km) | BLS | 20 | 20 | 20 | 17 | 16 | 15 | 5 |
+| | multiple shooting | 20 | 20 | 20 | 19 | 18 | 20 | **18** |
+| Small L1 halo (615, 48,009 km) | BLS | 20 | 20 | 20 | 17 | 15 | 4 | 3 |
+| | multiple shooting | 20 | 19 | 18 | 19 | 15 | 10 | 3 |
+| L1 Lyapunov, planar (933, 45,258 km) | BLS | 20 | **8** | **5** | 10 | 9 | 1 | 2 |
+| | multiple shooting | 20 | 16 | 12 | 12 | 10 | 3 | 0 |
+| Large L2 halo (37, 32,088 km) | BLS | 20 | 20 | 19 | 17 | 16 | 18 | 18 |
+| | multiple shooting | 20 | 20 | 19 | 16 | 16 | 14 | 13 |
+| NRHO 9:2 (1.3, 3,249 km) | BLS | 20 | 20 | 19 | 12 | 3 | 1 | 6 |
+| | multiple shooting | **14** | 1 | 3 | 1 | 0 | 0 | 0 |
+| DRO (1.0, 68,758 km) | BLS | 20 | 20 | 19 | 17 | 13 | 12 | 10 |
+| | multiple shooting | 20 | 20 | 19 | 14 | 13 | 12 | 8 |
+
+- **The 10,000 km target holds for BLS on 5 of 6 orbits** (≥ 19/20 at 10,000 km). The exception is the planar
+  L1 Lyapunov orbit: BLS fails 12 of 20 times already from 5,000 km, always onto one of two wrong solutions
+  3,844 km and 5,568 km from the truth (residuals 46σ and 5.1σ: the second is only just caught by a 3σ gate).
+- **Orbit stability does not predict the basin.** The stable DRO falls off past 10,000 km like the others, while
+  the unstable large L2 halo (stability 37) converges 18/20 from 100,000 km. (We expected stable orbits to be
+  easier; they are not.)
+- **Multiple shooting's big win is specific to our halo** (18/20 vs 5/20 from 100,000 km). It helps on the
+  Lyapunov orbit at 5,000–10,000 km, is no better on the small L1 halo and the DRO, worse on the large L2 halo
+  at large errors, and **fails on the NRHO even from 1,000 km** (14/20). That is a limitation of our
+  implementation, not of the idea: 4 equal segments put the fast perilune passage inside one segment, many
+  iterates hit the Moon (now stopped at impact), and the continuity tolerance (1e-8 DU) is too strict for that
+  sensitivity. Segment boundaries around perilune would be the fix to try.
 
 ## Open items
 
