@@ -84,3 +84,101 @@ def test_sweeper_obs_seed_default_and_override():
     sw.one(10.0, 9, {**ov, "seed": 9}, obs_seed=10_000,
            features=lambda obs, x_iod, x0: seen2.update(ra=obs.ra.copy()) or {})
     assert np.array_equal(seen["ra"], seen2["ra"])
+
+
+# ----------------------------------------------------------------------------- A4: features
+
+from od_stack.contracts import StateEstimate                                    # noqa: E402
+from od_stack.convergence_features import (FeatureCalculator, jacobi_constant, l1_x,  # noqa: E402
+                                           outcome_category)
+from od_stack.frames import rotating_to_emi, trajectory_to_rotating            # noqa: E402
+from od_stack.propagators import CR3BPPropagator                               # noqa: E402
+
+_FC = {}
+
+
+def _fc():
+    if "fc" not in _FC:
+        _FC["fc"] = FeatureCalculator(SYS, TRUTH)
+    return _FC["fc"]
+
+
+def _guess(d_km=0.0, w=0.0, seed=0, **dirs):
+    return TruthPlusError(SYS, truth_path=TRUTH, position_error_km=d_km, velocity_error_m_s=w, seed=seed,
+                          **dirs).estimate(_obs())
+
+
+def test_l1_and_jacobi_conventions():
+    import cr3bp                                    # top-level module in ROOT
+    x = l1_x(SYS.mu)
+    assert x == pytest.approx(0.83691, abs=1e-5)    # Earth-Moon L1, mu = 0.01215
+    s = np.array([0.9023581414, 0.0936861644, 0.1421356838, 0.1218991572, 0.1379776334, -0.2067777368])
+    e = cr3bp.jacobi(s[None, :3], s[None, 3:], SYS.mu)[0]
+    assert jacobi_constant(s, SYS.mu) == pytest.approx(-2 * e, rel=1e-14)   # cr3bp.jacobi is the energy
+
+
+def test_features_of_the_truth_are_zero():
+    f = _fc()(_obs(), _guess(), None)
+    for k in ("peri_delta_8d_km", "peri_delta_12d_km", "dr_along_los_km", "dr_across_los_km", "dr_R_km",
+              "dv_C_m_s", "dr_moon_radial_km", "dv_along_v_m_s"):
+        assert abs(f[k]) < 1e-3, k              # < 1 m: truth CSV rounding, periselene refinement
+    assert abs(f["delta_jacobi"]) < 1e-8                     # real cases: 0.1 to 1
+    assert np.isnan(f["angle_dr_los_deg"]) and np.isnan(f["angle_dv_v_deg"])
+    assert not (f["hits_moon"] or f["hits_earth"] or f["leaves_l1_region"])
+    assert f["start_residual_rms_sigma"] < 3                     # just the 10" noise
+    assert f["final_state_kind"] == "none"
+
+
+def test_periselene_matches_cr3bp_propagator_on_hourly_grid():
+    """The refined periselene is at or just below the hourly minimum from CR3BPPropagator."""
+    fc = _fc()
+    x = _guess(20000, 200, seed=5)
+    f = fc(_obs(), x, None)
+    t = np.arange(0, 12 * 86400 + 1, 3600.0)
+    rot = trajectory_to_rotating(CR3BPPropagator(SYS).propagate(x, t), SYS)
+    d = np.linalg.norm(rot[:, :3] - [1 - SYS.mu, 0, 0], axis=1) * SYS.du_km
+    assert f["peri_guess_12d_km"] <= d.min() + 1e-6
+    assert f["peri_guess_12d_km"] > d.min() - 50                # hourly samples are close already
+    assert abs(f["peri_guess_12d_day"] - t[np.argmin(d)] / 86400) < 1 / 24
+    truth = fc.truth_periselene["8d"]
+    assert 15_000 < truth["km"] < 25_000 and 0 < truth["day"] < 8
+
+
+def test_line_of_sight_and_ric_split():
+    obs = _obs()
+    f = _fc()(obs, _guess(5000, 0, position_direction=obs.los[2]), None)
+    # Tolerances of 1 m: the stand-in adds its error to the CSV truth row (10 decimals), the
+    # features compare against the re-propagated truth; they differ by about 1 cm.
+    assert f["dr_along_los_km"] == pytest.approx(5000, abs=1e-3)
+    assert f["dr_across_los_km"] == pytest.approx(0, abs=1e-3)
+    tr = _guess()
+    f = _fc()(obs, _guess(3000, 7, position_direction=tr.r, velocity_direction=tr.v), None)
+    assert f["dr_R_km"] == pytest.approx(3000, abs=1e-3)
+    assert f["dv_along_v_m_s"] == pytest.approx(7, abs=1e-6) and f["angle_dv_v_deg"] < 1e-3
+    g = _fc()(obs, _guess(4000, 9, seed=11), None)
+    assert np.hypot(np.hypot(g["dr_R_km"], g["dr_I_km"]), g["dr_C_km"]) == pytest.approx(4000, abs=1e-3)
+    assert np.hypot(g["dr_along_los_km"], g["dr_across_los_km"]) == pytest.approx(4000, abs=1e-3)
+
+
+def test_impact_and_l1_region_flags():
+    fc, obs = _fc(), _obs()
+    tau = SYS.tau(4 * 86400.0)
+    # 5,000 km from the Moon, falling straight at it -> hits the Moon
+    r, v = rotating_to_emi(tau, np.array([1 - SYS.mu + 5000 / SYS.du_km, 0, 0, -1.0, 0, 0]), SYS)
+    f = fc(obs, StateEstimate(t=4 * 86400.0, r=r, v=v), None)
+    assert f["hits_moon"] and f["peri_guess_12d_km"] < 1800
+    # Geostationary-like orbit: far from L1 the whole time, never near the Moon
+    r, v = rotating_to_emi(tau, np.array([-SYS.mu + 42164 / SYS.du_km, 0, 0, 0, 3.07 / (SYS.vu_ms / 1e3), 0]), SYS)
+    f = fc(obs, StateEstimate(t=4 * 86400.0, r=r, v=v), None)
+    assert f["leaves_l1_region"] and not f["hits_moon"] and not f["hits_earth"]
+
+
+def test_final_state_and_outcome_categories():
+    x = _guess(1000, 10)
+    last = StateEstimate(t=x.t, r=x.r, v=x.v, info={"state_kind": "last_iterate"})
+    f = _fc()(_obs(), x, last)
+    assert f["final_state_kind"] == "last_iterate" and f["peri_final_8d_km"] == pytest.approx(f["peri_guess_8d_km"])
+    assert outcome_category({"converged": True, "bls_finished": True}) == "converged"
+    assert outcome_category({"converged": False, "bls_finished": True}) == "wrong_orbit"
+    assert outcome_category({"bls_finished": False, "error": "maximal count (50) exceeded"}) == "iteration_limit"
+    assert outcome_category({"bls_finished": False, "error": "something else"}) == "other_error"

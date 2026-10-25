@@ -117,10 +117,13 @@ class Sweeper:
         try:
             x0 = self.estimator.refine(obs, x_iod)
         except EstimationFailure as e:
+            last = getattr(e, "last_state", None)
             row.update(bls_finished=False, converged=False, seconds=time.time() - t0,
                        error=str(e).split(": ", 1)[-1][:120])
+            if last is not None:
+                row["iterations"] = last.info.get("iterations")
             if features:
-                row.update(features(obs, x_iod, None))
+                row.update(features(obs, x_iod, last))
             return row
         tx = dense_truth(self.tru_rot, self.tru_tau, np.array([x0.t]), self.sys)
         err_km = float(np.linalg.norm(x0.r - tx.r[0]) / 1e3)

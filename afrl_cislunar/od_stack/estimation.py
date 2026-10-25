@@ -20,7 +20,11 @@ from .orekit_setup import start_orekit
 
 
 class EstimationFailure(RuntimeError):
-    pass
+    """last_state: where the estimator was when it gave up (or None), for diagnostics only."""
+
+    def __init__(self, msg: str, last_state: StateEstimate | None = None):
+        super().__init__(msg)
+        self.last_state = last_state
 
 
 class NoEstimation:
@@ -87,7 +91,8 @@ class OrekitBatchLS:
         try:
             fitted = estimator.estimate()[0]
         except Exception as e:
-            raise EstimationFailure(f"{self.name}: {str(e).splitlines()[0]}") from e
+            raise EstimationFailure(f"{self.name}: {str(e).splitlines()[0]}",
+                                    self._last_iterate(estimator, x0)) from e
 
         pv = fitted.getInitialState().getPVCoordinates(frame)
         p, v = pv.getPosition(), pv.getVelocity()
@@ -106,6 +111,20 @@ class OrekitBatchLS:
                   "evaluations": int(estimator.getEvaluationsCount()),
                   "rms_normalized_residual": float(estimator.getOptimum().getRMS())},
         )
+
+
+    @staticmethod
+    def _last_iterate(estimator, x0: StateEstimate) -> StateEstimate | None:
+        """The state Orekit last evaluated (its parameter drivers keep it after a failure).
+        It may be a rejected Levenberg-Marquardt trial point; use it for diagnostics only."""
+        try:
+            p = [d.getValue() for d in estimator.getOrbitalParametersDrivers(True).getDrivers()]
+            return StateEstimate(t=x0.t, r=np.array(p[:3]), v=np.array(p[3:6]), method=f"{x0.method} + last iterate",
+                                 info={"state_kind": "last_iterate",
+                                       "iterations": int(estimator.getIterationsCount()),
+                                       "evaluations": int(estimator.getEvaluationsCount())})
+        except Exception:
+            return None
 
 
 ESTIMATORS = {
