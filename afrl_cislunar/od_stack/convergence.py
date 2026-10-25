@@ -89,8 +89,10 @@ def init_worker(cfg: dict) -> None:
     parallel.WORKER["features"] = FeatureCalculator(sw.sys, sw.truth_path)
 
 
-def run_case(mode: str, size: float, k: int, obs_seed: int) -> dict:
-    sw, fc = parallel.WORKER["sweeper"], parallel.WORKER["features"]
+def run_case(mode: str, size: float, k: int, obs_seed: int, sw=None, fc=None,
+             noise_arcsec: float = NOISE_ARCSEC) -> dict:
+    sw = sw or parallel.WORKER["sweeper"]
+    fc = fc or parallel.WORKER["features"]
     d_km, w = errors_for(mode, size)
     u_r, u_v = directions(k)
     row = {"mode": mode, "size": float(size), "size_unit": "m/s" if mode == "velocity_only" else "km",
@@ -100,7 +102,7 @@ def run_case(mode: str, size: float, k: int, obs_seed: int) -> dict:
            **{f"vel_dir_{c}": float(x) for c, x in zip("xyz", u_v)}}
     ov = {"method": "truth_plus_error", "position_error_km": d_km, "velocity_error_m_s": w, "seed": int(k),
           "position_direction": u_r, "velocity_direction": u_v}
-    out = sw.one(NOISE_ARCSEC, int(k), ov, obs_seed=int(obs_seed), features=fc)
+    out = sw.one(float(noise_arcsec), int(k), ov, obs_seed=int(obs_seed), features=fc)
     out.pop("seed", None)                         # = direction
     row.update(out)
     row["estimator"] = sw.estimator.name
