@@ -283,7 +283,7 @@ def fig_periselene_by_error(path, rows, truth_peri):
     for ax in axs[:, 0]:
         ax.set_ylabel("Final error (km)")
     _legend_outcomes(axs.flat[0], present, fontsize=8, loc="lower right")
-    fig.suptitle("Final error vs periselene of the starting guess, per starting error (combined mode; "
+    fig.suptitle("Converged and failed starts overlap in periselene at every starting error (combined mode; "
                  f"dashed = truth periselene {truth_peri:,.0f} km; failures plotted at BLS's last iterate)")
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
@@ -311,7 +311,8 @@ def fig_vs_periselene(path, rows, truth_peri, a):
     ax.axvline(truth_peri, color="0.3", ls="--", lw=0.8, label=f"Truth periselene ({truth_peri:,.0f} km)")
     ax.set_xlabel("Periselene of starting guess, days 0–8 (km); bins of equal count")
     ax.set_ylabel("Fraction converged (95% interval)")
-    ax.set_title(f"Convergence vs periselene of the guess (combined, d ≥ 10,000 km; AUC = {a['auc']:.2f})")
+    verdict = "barely predicts" if abs(a["auc"] - 0.5) < 0.15 else "predicts"
+    ax.set_title(f"Periselene of the guess {verdict} failure (AUC {a['auc']:.2f}; combined, d ≥ 10,000 km)")
     ax.legend(fontsize=9)
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
@@ -336,7 +337,12 @@ def fig_curve(path, grid):
     ax.set_xlabel("Starting velocity error w (m/s), position exact")
     ax.set_title("Velocity error")
     ax.legend(fontsize=9, loc="lower left")
-    fig.suptitle("BLS convergence vs starting error (50 directions per size, one 10″ noise draw)")
+    comb = rate_by(sel(grid, mode="combined"), "size")
+    perfect = max([a["value"] for a in comb if all(b["rate"] == 1 for b in comb if b["value"] <= a["value"])] or [0])
+    at = {a["value"]: a["rate"] for a in comb}
+    fig.suptitle(f"BLS converges every time up to {perfect:,.0f} km; "
+                 f"{at.get(50_000.0, float('nan')):.0%} of directions at 50,000 km, {at.get(100_000.0, float('nan')):.0%} at 100,000 km "
+                 "(combined mode; 50 directions per size, one 10″ noise draw)")
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
@@ -356,7 +362,10 @@ def fig_features(path, rows, aucs):
         ax.set_ylabel("Fraction converged")
     for ax in axs.flat[n:]:
         ax.axis("off")
-    fig.suptitle("Convergence rate per bin of each candidate variable (combined, d ≥ 10,000 km; 95% intervals)")
+    top = sorted(aucs, key=lambda k: -abs((aucs[k]["auc"] if np.isfinite(aucs[k]["auc"]) else 0.5) - 0.5))[:3]
+    names = dict(FEATURES)
+    fig.suptitle("Failure is best predicted by " + ", ".join(f"{names[k].split(' (')[0]} (AUC {aucs[k]['auc']:.2f})" for k in top)
+                 + "\n(convergence rate per bin; combined, d ≥ 10,000 km; 95% intervals; AUC 0.5 = no information)")
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
@@ -377,7 +386,9 @@ def fig_threshold_hist(path, thr, stats):
         ax.axvline(s["p10_km"], color=c, ls=":", lw=1.2)
     ax.set_xlabel("Largest converged starting error (km), bisected to 250 km (100,000 = never failed)")
     ax.set_ylabel("Directions")
-    ax.set_title("Convergence threshold per error direction (solid: median, dotted: 10th percentile)")
+    c = stats.get("combined", next(iter(stats.values())))
+    ax.set_title(f"Half of directions converge from {c['median_km']:,.0f} km, 90% from {c['p10_km']:,.0f} km (combined)\n"
+                 "(solid: median, dotted: 10th percentile)")
     ax.legend(fontsize=9)
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -440,6 +451,42 @@ def fig_direction_map(path, grid):
     plt.close(fig)
 
 
+def fig_non_monotonic(path, grid, nm):
+    dirs = nm.get("combined", {}).get("directions", [])
+    if not dirs:
+        return False
+    fig, ax = plt.subplots(figsize=(10, 0.35 * len(dirs) + 1.6), dpi=110)
+    present = set()
+    for y, k in enumerate(dirs):
+        for r in sel(grid, mode="combined", direction=float(k)):
+            present.add(r["outcome"])
+            ax.scatter(r["size"], y, s=28, color=COLORS[r["outcome"]], marker="o" if r["outcome"] == "converged" else "x")
+    ax.set_yticks(range(len(dirs)))
+    ax.set_yticklabels([f"direction {k}" for k in dirs], fontsize=9)
+    ax.set_xscale("log")
+    ax.set_xlabel("Starting position error d (km), combined mode")
+    ax.grid(alpha=0.3, which="both")
+    ax.set_title(f"{len(dirs)} of {nm['combined']['of']} directions fail at some size and converge again at a larger one")
+    _legend_outcomes(ax, present, fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1))
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def safe_numbers(grid):
+    """Per mode: largest size up to which every direction converged, and the smallest failing size."""
+    out = {}
+    for mode in sorted({r["mode"] for r in grid}):
+        g = sel(grid, mode=mode)
+        fails = sorted(r["size"] for r in g if r["failed"])
+        sizes = sorted({r["size"] for r in g})
+        out[mode] = {"smallest_failed": fails[0] if fails else None,
+                     "all_converge_up_to": max([d for d in sizes if not fails or d < fails[0]] or [None]),
+                     "failure_kinds": {o: sum(r["outcome"] == o for r in g) for o in COLORS if o != "converged"}}
+    return out
+
+
 # ----------------------------------------------------------------------------- driver
 
 def _md_rate_table(b, unit):
@@ -474,6 +521,7 @@ def analyze(out_dir: str = OUT_DIR) -> dict:
                    "max_rms_of_converged": max([r["rms_normalized_residual"] for r in fin
                                                 if r["outcome"] == "converged"] or [np.nan])}
     res["non_monotonic"] = non_monotonic(grid)
+    res["safe"] = safe_numbers(grid)
     res["robustness"] = robustness(all_grid)
 
     big = [r for r in sel(grid, mode="combined") if r["size"] >= 10_000]
@@ -501,6 +549,8 @@ def analyze(out_dir: str = OUT_DIR) -> dict:
         fig_curve(figs["convergence_curve"], grid)
         figs["direction_map"] = os.path.join(out_dir, "direction_map.png")
         fig_direction_map(figs["direction_map"], grid)
+        if fig_non_monotonic(os.path.join(out_dir, "non_monotonic_directions.png"), grid, res["non_monotonic"]):
+            figs["non_monotonic_directions"] = os.path.join(out_dir, "non_monotonic_directions.png")
     if thr:
         first = {(r["mode"], r["direction"]): r for r in thr_runs if r.get("bisection_step") == 0}
         figs["threshold_hist"] = os.path.join(out_dir, "threshold_hist.png")
@@ -547,6 +597,14 @@ def tables_markdown(res) -> str:
                 f"{g['finished_fits']} finished fits: {g['wrong_orbit_caught']} wrong orbits caught, "
                 f"{g['wrong_orbit_passed']} wrong orbits passed the gate, {g['good_fit_rejected']} good fits rejected. "
                 f"Largest RMS of a converged fit: {g['max_rms_of_converged']:.2f}σ."]
+    out += ["", "## Safe starting error and how runs fail (grid, 50 directions)\n",
+            "| Mode | Every direction converges up to | Smallest failing size | Iteration limit | Wrong orbit (gate) | Other |",
+            "|---|---|---|---|---|---|"]
+    for m, v in res.get("safe", {}).items():
+        k = v["failure_kinds"]
+        out.append(f"| {MODE_LABELS.get(m, m)} | {v['all_converge_up_to']:,.0f} | {v['smallest_failed'] or 0:,.0f} | "
+                   f"{k.get('iteration_limit', 0)} | {k.get('wrong_orbit_rejected', 0) + k.get('wrong_orbit', 0)} | "
+                   f"{k.get('other_error', 0)} |")
     out += ["", "## Non-monotonic directions on the grid\n"]
     for m, v in res["non_monotonic"].items():
         out.append(f"- {m}: {v['count']} of {v['of']} ({v['directions']})")
