@@ -15,8 +15,11 @@ Run many independent stack cases on all cores, streaming rows to a CSV that can 
   of jobs that never finished are dropped on resume, so nothing is counted twice.
 - One failing job cannot kill the pool: the exception text is stored in its row.
 - A worker process that dies outright (e.g. the JVM crashing with SIGSEGV) breaks the pool; the
-  pool is then restarted and the unfinished jobs rerun (at most max_restarts times). Workers are
-  also recycled every max_tasks_per_child jobs so no JVM lives long enough to accumulate state.
+  pool is then restarted and the unfinished jobs rerun (at most max_restarts times).
+- Workers are recycled so no JVM lives long enough to accumulate state: jobs run in batches of
+  workers x max_tasks_per_child, each batch on a fresh pool that is shut down before the next one.
+  (Not ProcessPoolExecutor's own max_tasks_per_child: on Python 3.13 / macOS it hung once every
+  worker had retired and no replacements were started; seen at exactly 9 workers x 100 jobs.)
 """
 
 from __future__ import annotations
@@ -164,26 +167,28 @@ def _run_jobs_once(jobs, csv_path, key, work, init, init_args, workers, extra_cs
 
     main, extra = CsvAppender(csv_path), CsvAppender(extra_csv_path) if extra_csv_path else None
     t0, n = time.time(), 0
-    ex = ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn"),
-                             initializer=_init, initargs=(init, init_args), max_tasks_per_child=max_tasks_per_child)
-    try:
-        futures = [ex.submit(_run, work, j) for j in todo]
-        for fut in as_completed(futures):
-            out = fut.result()
-            row, extra_rows = (out if isinstance(out, tuple) else (out, []))
-            if extra is not None:
-                extra.append(extra_rows)              # extras first: a main row means the job is complete
-            main.append([row])
-            n += 1
-            el = time.time() - t0
-            eta = el / n * (total - n)
-            print(f"\r  {tag}{n}/{total} done, {_fmt_s(el)} elapsed, ~{_fmt_s(eta)} left   ",
-                  end="", flush=True)
-        print()
-    except KeyboardInterrupt:
-        print(f"\nInterrupted after {n}/{total}; finished rows are saved. Rerun to resume.", file=sys.stderr)
-        ex.shutdown(wait=False, cancel_futures=True)
-        raise
-    finally:
-        ex.shutdown(wait=True, cancel_futures=True)
+    batch = max(1, workers * int(max_tasks_per_child or 10**9))
+    for start in range(0, total, batch):
+        ex = ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn"),
+                                 initializer=_init, initargs=(init, init_args))
+        try:
+            futures = [ex.submit(_run, work, j) for j in todo[start:start + batch]]
+            for fut in as_completed(futures):
+                out = fut.result()
+                row, extra_rows = (out if isinstance(out, tuple) else (out, []))
+                if extra is not None:
+                    extra.append(extra_rows)              # extras first: a main row means the job is complete
+                main.append([row])
+                n += 1
+                el = time.time() - t0
+                eta = el / n * (total - n)
+                print(f"\r  {tag}{n}/{total} done, {_fmt_s(el)} elapsed, ~{_fmt_s(eta)} left   ",
+                      end="", flush=True)
+        except KeyboardInterrupt:
+            print(f"\nInterrupted after {n}/{total}; finished rows are saved. Rerun to resume.", file=sys.stderr)
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise
+        finally:
+            ex.shutdown(wait=True, cancel_futures=True)
+    print()
     return read_rows(csv_path)
