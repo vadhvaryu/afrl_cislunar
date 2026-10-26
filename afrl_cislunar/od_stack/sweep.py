@@ -161,7 +161,8 @@ def _wilson(k: int, n: int, z: float = 1.96):
     d = 1 + z**2 / n
     c = (p + z**2 / (2 * n)) / d
     h = z * np.sqrt(p * (1 - p) / n + z**2 / (4 * n**2)) / d
-    return p, max(0.0, c - h), min(1.0, c + h)
+    # clamped to contain p: at k = n, c + h can round to just below 1 (a negative error bar in matplotlib)
+    return p, min(p, max(0.0, c - h)), max(p, min(1.0, c + h))
 
 
 def aggregate(rows: list[dict], key: str) -> list[dict]:
