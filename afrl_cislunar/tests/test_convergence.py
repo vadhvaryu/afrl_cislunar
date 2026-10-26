@@ -294,6 +294,37 @@ def test_non_monotonic_rates_and_thresholds():
     assert s["at_least_100000"] == 1 and s["below_500"] == 1 and s["min_km"] == 0.0 and s["max_km"] == 100_000
 
 
+def test_wilson_interval_always_contains_the_rate():
+    """At k = n the upper edge can round to just below 1; a negative error bar then crashes matplotlib."""
+    from od_stack.sweep import _wilson
+    for n in range(1, 3000):
+        for k in (0, n // 2, n):
+            p, lo, hi = _wilson(k, n)
+            assert lo <= p <= hi
+
+
+def _write_grid(path, rows):
+    import csv as _csv
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="") as f:
+        w = _csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+
+
+def test_compare_estimators_counts_rescues(tmp_path):
+    def rows(ok):
+        return [{"mode": m, "size": d, "direction": k, "obs_seed": cplots.OBS_SEED, "bls_finished": True,
+                 "converged": ok(d, k), "rms_normalized_residual": 0.6 if ok(d, k) else 900.0,
+                 "outcome": "converged" if ok(d, k) else "wrong_orbit"}
+                for m in ("combined", "position_only") for d in (1_000.0, 20_000.0, 50_000.0) for k in range(4)]
+    _write_grid(str(tmp_path / "a" / "grid.csv"), rows(lambda d, k: d < 20_000 or k == 0))
+    _write_grid(str(tmp_path / "b" / "grid.csv"), rows(lambda d, k: d < 50_000 or k == 0))
+    res = cplots.compare([str(tmp_path / "a"), str(tmp_path / "b")], str(tmp_path / "cmp.png"))
+    assert res["vs_first"]["b"] == {"first_failed": 12, "rescued": 6, "lost": 0, "cases": 24}
+    assert res["safe"]["b"]["combined"]["all_converge_up_to"] == 20_000 and os.path.exists(tmp_path / "cmp.png")
+
+
 def test_residual_gate():
     g = conv.gated_outcome
     assert g({"bls_finished": True, "converged": True, "rms_normalized_residual": 0.6}) == "converged"

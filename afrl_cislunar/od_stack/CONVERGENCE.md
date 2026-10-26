@@ -9,6 +9,8 @@ variables), `od_stack/convergence_plots.py` (figures, statistics), `od_stack/par
 python -m od_stack.convergence all                                   # A2 grid + robustness + A3 bisections (~2.5 h, 9 workers)
 python -m od_stack.convergence all --estimation orekit_bls_robust    # same cases, robust estimator
 python -m od_stack.convergence_plots --out results/convergence/orekit_bls
+python -m od_stack.convergence_plots --out results/convergence \
+    --compare results/convergence/orekit_bls results/convergence/orekit_bls_robust   # plain vs robust figure
 python -m od_stack.estimator_compare settings | a7                    # BLS settings test | estimator comparison
 ```
 
@@ -47,7 +49,8 @@ all variables), `config_used.yaml`, `analysis.json`, `SUMMARY_tables.md` and the
 `threshold_vs_direction.png`.
 
 Figures shown at the Oct 30 meeting: `figures/2026-10-30/` (convergence_curve, periselene_by_error,
-convergence_vs_features, non_monotonic_directions, threshold_hist, orbits_convergence).
+convergence_vs_features, non_monotonic_directions, threshold_hist, orbits_convergence, plain_vs_robust_bls,
+a7_convergence, a7_nees, a7_runtime).
 
 ## d. Additional dependencies
 
@@ -112,18 +115,42 @@ a Moon-ward direction matter and that periselene and the line of sight do not.
 direction converged there in every mode, and it matches the lowest bisection threshold (9,453 km). The brief's
 "10th percentile of the A3 threshold" (43,557 km) is not safe because of the bisection bias above. The target also
 holds for 5 of the 6 other orbits tested (below), but not for the planar L1 Lyapunov orbit.
+**With `orekit_bls_robust` the target can be relaxed to 30,000 km and 300 m/s**: every direction converged up to
+there in all three modes on the full robust grid (below). Caveat as in point 6: same 50 directions the robust
+estimator was designed on.
 
 **6. Stall or bad minimum?** About half each: 146 iteration-limit and 140 wrong-orbit failures (combined).
 Every wrong orbit had residuals far above 3σ (largest good fit: 0.94σ): over the grid and the bisections the
 gate caught all 1,016 wrong orbits and rejected no good fit.
 
-**Rescue rate with `orekit_bls_robust`** (A7 below, 50 directions, 10″): it converged in every case where plain BLS
-did, and rescued **all** plain-BLS failures from 15,000–30,000 km (17 of 17), 7 of 12 at 50,000 km and 7 of 39 at
-100,000 km. Arc continuation (fit days 0–4 first, then all 8 days) does almost all of the work: it alone
-converged 147 of the 150 cases from 15,000–30,000 km. The ±10,000/±20,000 km line-of-sight restarts rescued 3
-cases there and 6 at 50,000 km. Every case it could not rescue ended with no fit passing the gate (reported as
-a failure, never as a wrong orbit). Caveat: we designed the continuation after seeing the A2 failures on these
-same directions, so it is not an independent test; the full robust grid and bisection (round 2) will add more.
+**Rescue rate with `orekit_bls_robust`** (round 2: the full A2 grid rerun with the robust estimator, 4,510 runs on
+the Mac; `figures/2026-10-30/plain_vs_robust_bls.png`). On the 4,350 grid cases it converges in **266 of the 429
+cases plain BLS fails** and fails none of those plain BLS converges; where both converge they reach the same
+solution (within 0.1 m). Every direction converges up to:
+
+| Mode | Plain BLS | Robust BLS |
+|---|---|---|
+| Combined (d km, 0.01·d m/s) | 10,000 km | **40,000 km** (45/50 at 50,000, 18/50 at 100,000) |
+| Position only | 12,000 km | **30,000 km** (35/50 at 100,000, same as plain) |
+| Velocity only | 150 m/s | **300 m/s** (48–50/50 up to 1,000 m/s) |
+
+- **It removes the stalls.** Plain BLS failed 280 times at the iteration limit; robust BLS never does. All 163 of its
+  failures (over all 4,510 runs) end with no fit passing the 3σ gate, so it never returns a wrong orbit. Arc continuation (fit
+  the first 3 observations, days 0–4, then all 5) does almost all of the work: 4,053 of its 4,347 converged fits;
+  plain BLS 199; the ±10,000/±20,000 km line-of-sight restarts 95.
+- **It helps the velocity, not the far position errors.** Past 40,000 km position-only it converges exactly the
+  same cases as plain BLS; the gains are in combined and velocity-only errors.
+- **Fewer non-monotonic directions:** 8 of 50 (combined) against 13.
+- **Cost:** median 5.6 s per fit against 4.9 s, but a mean of 15.5 s against 7.0 s, because a failing case tries
+  every restart (up to ~7 minutes). The bisection (A3) was stopped after 7 of 400 directions (~8 hours projected);
+  it is not summarized.
+- **What predicts its failures** (regression, combined, d ≥ 10,000 km): the size of the error (β +2.54), the
+  cross-track part of the error (+1.63) and a Moon-ward direction (−0.88). Periselene of the guess now has a small
+  effect (+0.81, interval +0.31 to +1.44), likely because the remaining failures are all at ≥ 50,000 km, where
+  large errors also move the periselene; it is still not the main variable.
+- Caveat: the continuation was designed after seeing the plain-BLS failures on these same 50 directions, so this is
+  not an independent test. The 7 finished bisection directions (new ones) all converge up to at least 45,635 km,
+  consistent with the grid, but are too few to be a check.
 
 Other measured facts:
 - **Noise draw:** 0 of 40 (direction, size) cases change outcome across 5 noise draws: failure depends on the

@@ -32,6 +32,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 from scipy.optimize import minimize
 from scipy.stats import mannwhitneyu
 
@@ -40,6 +41,8 @@ from .sweep import _wilson
 
 OUT_DIR = "results/convergence/orekit_bls"
 OBS_SEED = 10_000
+MIN_THRESHOLD_DIRECTIONS = 50       # fewer finished bisections (an interrupted run) are not summarized
+ESTIMATOR_LABELS = {"orekit_bls": "Plain BLS", "orekit_bls_robust": "Robust BLS"}
 COLORS = {"converged": "#004B8D", "iteration_limit": "#E69F00", "wrong_orbit": "#D55E00",
           "wrong_orbit_rejected": "#CC79A7", "good_fit_rejected": "#56B4E9", "other_error": "#808F9C"}
 LABELS = {"converged": "Converged", "iteration_limit": "Iteration limit", "wrong_orbit": "Wrong orbit (passed gate)",
@@ -110,6 +113,17 @@ def load(path: str) -> list[dict]:
         r["final_error_shown_km"] = (r.get("position_error_km") if r.get("bls_finished") is True
                                      else r.get("final_state_error_km", np.nan))
     return rows
+
+
+def estimator_label(out_dir: str) -> str:
+    """Name of the estimator a results folder was made with (from its config_used.yaml)."""
+    method = os.path.basename(os.path.normpath(out_dir))
+    try:
+        with open(os.path.join(out_dir, "config_used.yaml")) as f:
+            method = yaml.safe_load(f)["estimation"]["method"]
+    except (OSError, KeyError, TypeError):
+        pass
+    return ESTIMATOR_LABELS.get(method, method)
 
 
 def col(rows, k):
@@ -319,7 +333,7 @@ def fig_vs_periselene(path, rows, truth_peri, a):
     plt.close(fig)
 
 
-def fig_curve(path, grid):
+def fig_curve(path, grid, name="BLS"):
     fig, axs = plt.subplots(1, 2, figsize=(13, 4.6), dpi=110)
     ax = axs[0]
     for mode, c in (("combined", "#004B8D"), ("position_only", "#D55E00")):
@@ -340,7 +354,7 @@ def fig_curve(path, grid):
     comb = rate_by(sel(grid, mode="combined"), "size")
     perfect = max([a["value"] for a in comb if all(b["rate"] == 1 for b in comb if b["value"] <= a["value"])] or [0])
     at = {a["value"]: a["rate"] for a in comb}
-    fig.suptitle(f"BLS converges every time up to {perfect:,.0f} km; "
+    fig.suptitle(f"{name} converges every time up to {perfect:,.0f} km; "
                  f"{at.get(50_000.0, float('nan')):.0%} of directions at 50,000 km, {at.get(100_000.0, float('nan')):.0%} at 100,000 km "
                  "(combined mode; 50 directions per size, one 10″ noise draw)")
     fig.tight_layout()
@@ -533,6 +547,9 @@ def analyze(out_dir: str = OUT_DIR) -> dict:
         fp = np.array([r["failed"] for r in big_pos])
         res["auc_position_only_d_ge_10000"] = {k: auc(col(big_pos, k), fp) for k, _ in FEATURES}
     res["logit_combined_d_ge_10000"] = logistic(pooled, LOGIT_FEATURES)
+    if 0 < len(thr) < MIN_THRESHOLD_DIRECTIONS:          # interrupted bisection: too few to summarize
+        res["thresholds_partial"] = len(thr)
+        thr = []
     if thr:
         res["thresholds"] = threshold_stats(thr)
 
@@ -546,7 +563,7 @@ def analyze(out_dir: str = OUT_DIR) -> dict:
         fig_features(figs["convergence_vs_features"], big, res["auc_combined_d_ge_10000"])
     if grid:
         figs["convergence_curve"] = os.path.join(out_dir, "convergence_curve.png")
-        fig_curve(figs["convergence_curve"], grid)
+        fig_curve(figs["convergence_curve"], grid, estimator_label(out_dir))
         figs["direction_map"] = os.path.join(out_dir, "direction_map.png")
         fig_direction_map(figs["direction_map"], grid)
         if fig_non_monotonic(os.path.join(out_dir, "non_monotonic_directions.png"), grid, res["non_monotonic"]):
@@ -571,6 +588,9 @@ def tables_markdown(res) -> str:
     for m, unit in (("combined", "km"), ("position_only", "km"), ("velocity_only", "m/s")):
         if res["curve"][m]:
             out += [f"## {MODE_LABELS[m]}\n", _md_rate_table(res["curve"][m], unit), ""]
+    if "thresholds_partial" in res:
+        out += ["## Per-direction thresholds (A3)\n",
+                f"Only {res['thresholds_partial']} directions finished (interrupted run); not summarized.", ""]
     if "thresholds" in res:
         out += ["## Per-direction thresholds (A3)\n",
                 "| Mode | Directions | Median | 10th pct | 90th pct | Min | Max | ≥ 100,000 | < 500 |",
@@ -617,10 +637,61 @@ def tables_markdown(res) -> str:
     return "\n".join(out) + "\n"
 
 
+def compare(dirs: list[str], path: str) -> dict:
+    """Two or more estimators on the same grid cases: convergence vs starting error (combined and
+    position-only), and how many of the first estimator's failures each later one rescues."""
+    grids = {}
+    for d in dirs:
+        g = [r for r in load(os.path.join(d, "grid.csv")) if r["obs_seed"] == OBS_SEED]
+        grids[estimator_label(d)] = g
+    names = list(grids)
+    key = lambda r: (r["mode"], r["size"], r["direction"])
+    base = {key(r): r["failed"] for r in grids[names[0]]}
+    res = {"estimators": names, "curves": {}, "vs_first": {}}
+    for n, g in grids.items():
+        res["curves"][n] = {m: rate_by(sel(g, mode=m), "size") for m in ("combined", "position_only", "velocity_only")}
+        res["safe"] = res.get("safe", {}) | {n: safe_numbers(g)}
+        if n != names[0]:
+            both = [(base[key(r)], r["failed"]) for r in g if key(r) in base]
+            res["vs_first"][n] = {"first_failed": sum(f for f, _ in both),
+                                  "rescued": sum(f and not h for f, h in both),
+                                  "lost": sum(h and not f for f, h in both), "cases": len(both)}
+
+    shades = ["#9AA5B1", "#004B8D", "#D55E00", "#CC79A7"]
+    fig, axs = plt.subplots(1, 2, figsize=(13, 4.6), dpi=110, sharey=True)
+    for ax, mode in zip(axs, ("combined", "position_only")):
+        for n, c in zip(names, shades):
+            _rate_panel(ax, res["curves"][n][mode], color=c, label=n, x="value")
+        ax.set_xscale("log")
+        ax.set_xlabel("Starting position error d (km)")
+        ax.set_title(MODE_LABELS[mode])
+        ax.legend(fontsize=9, loc="lower left")
+    axs[0].set_ylabel("Fraction converged (95% interval)")
+    t = ", ".join(f"{n} {res['safe'][n]['combined']['all_converge_up_to']:,.0f} km" for n in names)
+    title = f"Every direction converges (combined mode) up to: {t}"
+    if len(names) > 1:
+        v = res["vs_first"][names[1]]
+        title += (f"\n{names[1]} converges in {v['rescued']} of the {v['first_failed']} grid cases {names[0]} fails "
+                  f"and fails {v['lost'] or 'none'} of those it converges (all modes, 50 directions, one 10″ noise draw)")
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+    res["figure"] = path
+    return res
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Plots and statistics for the convergence study")
     ap.add_argument("--out", default=OUT_DIR)
+    ap.add_argument("--compare", nargs="+", metavar="DIR",
+                    help="results folders of different estimators (first = baseline): writes "
+                         "<out>/compare_estimators.png instead of the single-estimator analysis")
     a = ap.parse_args(argv)
+    if a.compare:
+        res = compare(a.compare, os.path.join(a.out, "compare_estimators.png"))
+        print(json.dumps({k: v for k, v in res.items() if k != "curves"}, indent=1, default=float))
+        return 0
     res = analyze(a.out)
     print(tables_markdown(res))
     print("Figures:", *res["figures"].values(), sep="\n  ")
