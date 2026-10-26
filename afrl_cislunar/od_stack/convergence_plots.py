@@ -387,8 +387,8 @@ def fig_threshold_hist(path, thr, stats):
     ax.set_xlabel("Largest converged starting error (km), bisected to 250 km (100,000 = never failed)")
     ax.set_ylabel("Directions")
     c = stats.get("combined", next(iter(stats.values())))
-    ax.set_title(f"Half of directions converge from {c['median_km']:,.0f} km, 90% from {c['p10_km']:,.0f} km (combined)\n"
-                 "(solid: median, dotted: 10th percentile)")
+    ax.set_title(f"Bisected thresholds: median {c['median_km']:,.0f} km, 10th percentile {c['p10_km']:,.0f} km (combined).\n"
+                 "Biased high: bisection skips mid-size failures of non-monotonic directions (see grid)")
     ax.legend(fontsize=9)
     ax.grid(alpha=0.3)
     fig.tight_layout()

@@ -46,13 +46,16 @@ all variables), `config_used.yaml`, `analysis.json`, `SUMMARY_tables.md` and the
 `convergence_vs_features.png`, `non_monotonic_directions.png`, `direction_map.png`, `threshold_hist.png`,
 `threshold_vs_direction.png`.
 
+Figures shown at the Oct 30 meeting: `figures/2026-10-30/` (convergence_curve, periselene_by_error,
+convergence_vs_features, non_monotonic_directions, threshold_hist, orbits_convergence).
+
 ## d. Additional dependencies
 
 None beyond `requirements.txt`. Orekit runs inside the worker processes only (spawned, one JVM each).
 
 ---
 
-## Results (Orekit BLS, 4,510 grid runs; A3 bisections pending)
+## Results (Orekit BLS: 4,510 grid runs + 2,582 bisection runs over 400 directions)
 
 | Starting error | Combined | Position only | Velocity only |
 |---|---|---|---|
@@ -66,7 +69,19 @@ None beyond `requirements.txt`. Orekit runs inside the worker processes only (sp
 **1. Where does convergence fall off?** Every direction converges up to 10,000 km (combined), 12,000 km
 (position only) and 150 m/s (velocity only). The first failure is at 10,500 km. Between 15,000 and 40,000 km
 85-90% of directions converge; past 50,000 km the rate drops steeply (22% at 100,000 km).
-_A3 threshold percentiles: pending._
+
+A3 bisection thresholds (200 new directions per mode, bracket ≤ 250 km, 8.3 runs per direction on average):
+
+| Mode | Median | 10th percentile | 90th percentile | Lowest | Never failed (≥ 100,000 km) |
+|---|---|---|---|---|---|
+| Combined | 73,745 km | 43,557 km | ≥ 100,000 km | 9,453 km | 60 of 200 |
+| Position only | ≥ 100,000 km | 76,120 km | ≥ 100,000 km | 10,195 km | 142 of 200 |
+
+**These bisection thresholds are biased high and should not be used as the target.** Bisection tests 5,000 km,
+then 100,000 km, then the midpoint; when a direction converges at 52,500 km it searches upward and never sees the
+15,000-40,000 km band in which the grid shows 10-15% of directions failing. 13 of the 50 grid directions are
+non-monotonic in exactly this way. The lowest bisection threshold (9,453 km) does agree with the grid's first
+failure (10,500 km).
 
 **2. Position or velocity?** At large errors, mostly the velocity: at 50,000 km, position alone converges
 50/50, adding the matching 500 m/s drops it to 38/50. Below 40,000 km both contribute about equally.
@@ -75,17 +90,32 @@ _A3 threshold percentiles: pending._
 other variables in the regression its coefficient is zero (95% interval −0.34 to +0.22). Converged and failed
 starts overlap in periselene at every starting error (`periselene_by_error.png`).
 
-**4. What does?** The direction of the error relative to the Moon: errors pointing toward the Moon converge
-~62% of the time, ~90% otherwise (strongest regression coefficient, −1.16). The Jacobi constant change
-predicts failure about as well as the error size (AUC 0.82 each). The range along the line of sight is not
-the culprit: errors along the line of sight fail slightly less often than errors across it (coefficient −0.25).
+**4. What does?** The size of the error first, then its direction relative to the Moon. Errors pointing toward
+the Moon converge ~62% of the time, ~90% otherwise. The Jacobi constant change predicts failure about as well as
+the error size (AUC 0.82 each), but mostly because it grows with the size. The range along the line of sight is not
+the culprit. Logistic regression of failure (standardized coefficients, 95% bootstrap intervals):
 
-**5. Recommended IOD accuracy target for David and Mack:** within **10,000 km and 100 m/s** of the truth (every
-direction converged there in every mode). _10th-percentile threshold from A3: pending._
+| Variable | Grid only, d ≥ 10,000 km (n = 1,650) | Grid + bisection runs (n = 3,106) |
+|---|---|---|
+| log error size | +0.94 (+0.71 to +1.24) | **+1.11** (+0.95 to +1.30) |
+| Moon-radial direction (−1 = toward the Moon) | **−1.16** (−1.44 to −0.92) | −0.39 (−0.53 to −0.26) |
+| cross-track fraction | +0.26 (+0.05 to +0.49) | +0.41 (+0.29 to +0.56) |
+| Jacobi constant change | +0.80 (+0.54 to +1.19) | +0.23 (+0.13 to +0.33) |
+| velocity error along v | +0.23 (+0.08 to +0.40) | +0.16 (+0.06 to +0.26) |
+| line-of-sight fraction | −0.25 (−0.41 to −0.09) | −0.02 (−0.10 to +0.09), none |
+| periselene of the guess | −0.02 (−0.34 to +0.22), none | +0.12 (−0.03 to +0.25), none |
+
+The bisection runs cluster near each direction's threshold, which shifts the weights; both fits agree that size and
+a Moon-ward direction matter and that periselene and the line of sight do not.
+
+**5. Recommended IOD accuracy target for David and Mack:** within **10,000 km and 100 m/s** of the truth. Every
+direction converged there in every mode, and it matches the lowest bisection threshold (9,453 km). The brief's
+"10th percentile of the A3 threshold" (43,557 km) is not safe because of the bisection bias above. The target also
+holds for 5 of the 6 other orbits tested (below), but not for the planar L1 Lyapunov orbit.
 
 **6. Stall or bad minimum?** About half each: 146 iteration-limit and 140 wrong-orbit failures (combined).
-Every wrong orbit had residuals far above 3σ (largest good fit: 0.94σ), so the gate caught all 176 wrong
-orbits and rejected no good fit. _Rescue rate with restarts (orekit_bls_robust): pending (round 2)._
+Every wrong orbit had residuals far above 3σ (largest good fit: 0.94σ): over the grid and the bisections the
+gate caught all 1,016 wrong orbits and rejected no good fit. _Rescue rate with restarts (orekit_bls_robust): pending (round 2)._
 
 Other measured facts:
 - **Noise draw:** 0 of 40 (direction, size) cases change outcome across 5 noise draws: failure depends on the
