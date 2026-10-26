@@ -366,3 +366,13 @@ def test_parallel_runner_restarts_after_a_worker_dies(tmp_path):
     rows = parallel.run_jobs(jobs, path, key=("i",), work=_crash_once_work, init=_dummy_init, init_args=("w",),
                              workers=2, max_tasks_per_child=2)
     assert sorted(int(r["i"]) for r in rows) == list(range(6)) and all(r["ok"] == "True" for r in rows)
+
+
+def test_parallel_runner_recycles_workers_without_hanging(tmp_path):
+    """More jobs than workers x max_tasks_per_child: every job finishes (the built-in recycling of
+    ProcessPoolExecutor hung here on macOS once all workers had retired)."""
+    path = str(tmp_path / "runs.csv")
+    jobs = [{"i": i, "mode": "m"} for i in range(11) if i != 3]
+    rows = parallel.run_jobs(jobs, path, key=("mode", "i"), work=_dummy_work, init=_dummy_init, init_args=("w",),
+                             workers=2, max_tasks_per_child=2)
+    assert sorted(int(r["i"]) for r in rows) == [i for i in range(11) if i != 3]
