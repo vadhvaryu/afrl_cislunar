@@ -115,7 +115,15 @@ holds for 5 of the 6 other orbits tested (below), but not for the planar L1 Lyap
 
 **6. Stall or bad minimum?** About half each: 146 iteration-limit and 140 wrong-orbit failures (combined).
 Every wrong orbit had residuals far above 3σ (largest good fit: 0.94σ): over the grid and the bisections the
-gate caught all 1,016 wrong orbits and rejected no good fit. _Rescue rate with restarts (orekit_bls_robust): pending (round 2)._
+gate caught all 1,016 wrong orbits and rejected no good fit.
+
+**Rescue rate with `orekit_bls_robust`** (A7 below, 50 directions, 10″): it converged in every case where plain BLS
+did, and rescued **all** plain-BLS failures from 15,000–30,000 km (17 of 17), 7 of 12 at 50,000 km and 7 of 39 at
+100,000 km. Arc continuation (fit days 0–4 first, then all 8 days) does almost all of the work: it alone
+converged 147 of the 150 cases from 15,000–30,000 km. The ±10,000/±20,000 km line-of-sight restarts rescued 3
+cases there and 6 at 50,000 km. Every case it could not rescue ended with no fit passing the gate (reported as
+a failure, never as a wrong orbit). Caveat: we designed the continuation after seeing the A2 failures on these
+same directions, so it is not an independent test; the full robust grid and bisection (round 2) will add more.
 
 Other measured facts:
 - **Noise draw:** 0 of 40 (direction, size) cases change outcome across 5 noise draws: failure depends on the
@@ -130,12 +138,63 @@ Other measured facts:
 
 ## Estimators without batch least squares (A7)
 
-_Pending (round 2): convergence of none / orekit_bls / orekit_bls_robust / multiple_shooting /
-multiple_shooting_then_bls / ukf on 50 directions × 7 sizes, plus NEES vs noise._
+`python -m od_stack.estimator_compare a7` (2,460 runs, run on the Mac). Same truth orbit and 5 observations;
+combined mode (velocity error 0.01 m/s per km); 50 directions × 7 starting errors at one 10″ noise draw, plus a
+noise sweep (1/10/100″, 20 seeds, start 1,000 km). All pipelines are graded the same way: converged = within
+1,000 km of the truth (scaled with noise above 10″) **and** residual RMS ≤ 3σ. Figures:
+`figures/2026-10-30/a7_convergence.png`, `a7_nees.png`, `a7_runtime.png`.
 
-Spot checks so far: multiple shooting converges from both 100,000 km cases plain BLS fails, lands 0.77 km from
-Orekit BLS's answer, and its covariance matches Orekit's to 6e-5; the UKF works from 1,000 km at 10″ but not
-from 15,000 km, and is overconfident below ~3″.
+Converged out of 50:
+
+| Pipeline | 1k | 10k | 15k | 20k | 30k | 50k | 100k km | Median s/run |
+|---|---|---|---|---|---|---|---|---|
+| `none` (use the IOD as is) | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0.2 |
+| `orekit_bls` | 50 | 50 | 45 | 45 | 43 | 38 | 11 | 3–12 |
+| `orekit_bls_robust` | 50 | 50 | **50** | **50** | **50** | **45** | 18 | 3–9 (95 at 100k) |
+| `multiple_shooting` (CR3BP, no Orekit) | 50 | 50 | 47 | 43 | 42 | 40 | **33** | 0.8–1.8 |
+| `multiple_shooting_then_bls` | 50 | 50 | 47 | 43 | 42 | 40 | **33** | 2–3 |
+| `ukf` (+ RTS smoother) | 50 | 0 | 0 | 0 | 0 | 0 | 0 | 0.1–0.5 |
+| robust, else multiple shooting → BLS | 50 | 50 | 50 | 50 | 50 | 49 | 38 | |
+
+The last row is not a run pipeline: it combines the two rows above per direction.
+
+Noise sweep (start 1,000 km; NEES expect 6):
+
+| Pipeline | 1″: median error, NEES, inside 95% | 10″ | 100″ |
+|---|---|---|---|
+| all BLS pipelines (identical) | 3.0 km, 9.7, 15/20 | 29 km, 6.6, 18/20 | 293 km, 6.6, 19/20 |
+| `multiple_shooting` | 2.9 km, **6.5, 19/20** | 29 km, 6.5, 19/20 | 292 km, 6.6, 19/20 |
+| `ukf` | 5 of 20 pass the gate (2.0 km, 4.1) | 28 km, 7.8, 16/20 | 279 km, 6.6, 19/20 |
+| `none` | 1,000 km by construction; 7,212 km max error over 8 days; ~150σ residual at 10″ | | |
+
+What this shows:
+
+1. **Use an estimator: the IOD alone is not usable.** A 1,000 km start drifts to a median 7,212 km error over the
+   8 days, with residuals near 150σ at 10″. (Graded naively, `none` "converged" 22 of 50 times at 1,000 km because its
+   error sat on the 1,000 km threshold; it is now graded by its starting residual like every other fit.)
+2. **Keep batch least squares and make `orekit_bls_robust` the default.** It converges in every direction up to
+   30,000 km (plain BLS: 43–45 of 50 from 15,000–30,000 km), never loses a case plain BLS wins, and costs about the
+   same (3–9 s) except from 100,000 km. All BLS pipelines land on the same solution (the default-seed case is
+   5.891 km from the truth in every one of them).
+3. **Multiple shooting reaches furthest** (33 of 50 from 100,000 km, against 18) and is the fastest, but loses
+   3–8 cases from 15,000–30,000 km that the robust BLS gets. All 45 of its failures are iterates that pass
+   through the Earth or the Moon (now stopped at impact). The two are complementary: robust BLS, falling back to
+   multiple shooting → BLS when the gate rejects everything, would converge 49 of 50 at 50,000 km and 38 of 50 at
+   100,000 km. Multiple shooting's advantage is specific to this halo (see Other orbits: it fails on the NRHO).
+4. **Multiple shooting's honest uncertainty at 1″ confirms the light-time explanation.** Its observation model
+   is the CR3BP's, which, like the generator, has no light time: NEES 6.5 and 19 of 20 truths inside the 95%
+   region at 1″, against 9.7 and 15 of 20 for Orekit, whose angles include light time. On real data this
+   advantage disappears (both should model light time), so it is not a reason to drop BLS.
+5. **The UKF only works from a good start.** From 1,000 km at 10″ it converges every time, but from 10,000 km
+   and beyond never: 117 runs end with a sigma point on an impact trajectory, the rest on fits 140 km or more off
+   (median 450 km or more; residuals 12σ and up), all caught by the gate. At 1″ it stops short of the least-squares minimum (15 of 20 fits at
+   ~7σ, the linearization floor already seen in the tests). Not a replacement for BLS at IOD-sized errors.
+6. **Multiple shooting followed by BLS adds nothing over multiple shooting alone on this data** except
+   Orekit's model (same answer as plain BLS, same convergence as multiple shooting).
+
+Answer to "should we avoid batch least squares?": no. Every converged pipeline agrees with BLS; the robust
+version is the best single estimator up to 50,000 km; multiple shooting is worth keeping as a fallback for very
+poor starts on halo-like orbits.
 
 ## Other orbits (`od_stack/orbit_catalog.py`, `od_stack/orbit_study.py`)
 
