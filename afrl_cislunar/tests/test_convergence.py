@@ -351,6 +351,28 @@ def test_estimator_compare_runs_and_plots_without_orekit(tmp_path):
     assert len(ec.plot_a7(summ, str(tmp_path))) == 6
 
 
+def test_a7_none_pipeline_is_graded_by_its_starting_residual():
+    """'none' reports no residual; a start just under the 'converged' distance must still fail the gate."""
+    from od_stack import estimator_compare as ec
+    base = {"variant": "P0_none", "kind": "grid", "size": "1000.0", "bls_finished": "True", "converged": "True",
+            "rms_normalized_residual": "", "position_error_km": "999.99998", "seconds": "0.1"}
+    rows = [{**base, "estimator": "none", "start_residual_rms_sigma": "146.0"},
+            {**base, "estimator": "none", "start_residual_rms_sigma": "1.5"}]
+    g = ec.summarize(rows)["grid"]["P0_none"][0]
+    assert g["outcomes"] == {"converged": 1, "good_fit_rejected": 1}
+    # the start residual is only used for 'none'
+    assert ec._gate_rms({**base, "estimator": "orekit_bls", "start_residual_rms_sigma": "146.0"}) is None
+
+
+def test_a7_title_states_the_result():
+    from od_stack import estimator_compare as ec
+    row = lambda size, conv: {"size": size, "converged": conv, "runs": 50, "rate": conv / 50}
+    grid = {"A": [row(1e3, 50), row(3e4, 50), row(1e5, 18)], "B": [row(1e3, 50), row(3e4, 42), row(1e5, 33)],
+            "C": [row(1e3, 50), row(3e4, 42), row(1e5, 33)]}
+    t = ec._a7_title(grid)
+    assert t.startswith("A converges in every direction up to 30,000 km") and "B and C do best from 100,000 km (66%)" in t
+
+
 def _crash_once_work(job):
     """Kills its worker process the first time job 2 runs (marker file), like a JVM SIGSEGV."""
     marker = job["marker"]

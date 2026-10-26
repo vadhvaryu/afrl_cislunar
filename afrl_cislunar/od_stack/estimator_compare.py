@@ -109,13 +109,22 @@ def _f(r, k):
         return np.nan
 
 
+def _gate_rms(r: dict):
+    """Residual RMS the gate sees. The 'none' pipeline returns the IOD state unchanged and reports no
+    residual, so its residual is the starting one (without this, a 1,000 km start graded against the
+    1,000 km 'converged' threshold passed or failed on rounding, and every 100″ start passed)."""
+    for k in ("rms_normalized_residual",) + (("start_residual_rms_sigma",) if r.get("estimator") == "none" else ()):
+        if r.get(k) not in ("", None) and np.isfinite(_f(r, k)):
+            return _f(r, k)
+    return None
+
+
 def summarize(rows: list[dict]) -> dict:
     out = {"grid": {}, "noise": {}}
     for r in rows:
         r["outcome"] = gated_outcome({**r, "bls_finished": r.get("bls_finished") in (True, "True"),
                                       "converged": r.get("converged") in (True, "True"),
-                                      "rms_normalized_residual": _f(r, "rms_normalized_residual")
-                                      if r.get("rms_normalized_residual") not in ("", None) else None})
+                                      "rms_normalized_residual": _gate_rms(r)})
     for kind, by in (("grid", "size"), ("noise", "noise_arcsec")):
         for v in sorted({r["variant"] for r in rows if r["kind"] == kind}):
             for x in sorted({_f(r, by) for r in rows if r["kind"] == kind and r["variant"] == v}):
@@ -171,6 +180,26 @@ def best_variant(summ: dict) -> str:
 
 # ----------------------------------------------------------------------------- figures (A7)
 
+def _a7_title(grid: dict) -> str:
+    """Convergence-figure title that states the result: the variant that converges in every direction up to
+    the largest starting error, and the best variant at the largest error."""
+    def reach(rows):
+        ok = 0.0
+        for a in sorted(rows, key=lambda a: a["size"]):
+            if a["converged"] < a["runs"]:
+                break
+            ok = a["size"]
+        return ok
+    far = max(next(iter(grid.values())), key=lambda a: a["size"])["size"]
+    v_all = max(grid, key=lambda v: reach(grid[v]))
+    far_rate = {v: next(a["rate"] for a in grid[v] if a["size"] == far) for v in grid}
+    v_far = [v for v in grid if far_rate[v] == max(far_rate.values())]
+    t = f"{v_all} converges in every direction up to {reach(grid[v_all]):,.0f} km"
+    if v_all not in v_far:
+        t += f";\n{' and '.join(v_far)} do{'es' if len(v_far) == 1 else ''} best from {far:,.0f} km ({far_rate[v_far[0]]:.0%})"
+    return t + " (10″, 3σ gate)"
+
+
 def plot_a7(summ: dict, out_dir: str) -> list[str]:
     import matplotlib
 
@@ -179,6 +208,12 @@ def plot_a7(summ: dict, out_dir: str) -> list[str]:
 
     plt.rcParams.update({"font.size": 10})
     colors = dict(zip(PIPELINES, ["#808F9C", "#004B8D", "#56B4E9", "#D55E00", "#CC79A7", "#E69F00"]))
+    # P3 and P4 converge on the same cases: different markers and a dashed P4 keep both visible
+    styles = dict(zip(PIPELINES, [("o", "-"), ("o", "-"), ("s", "-"), ("^", "-"), ("v", "--"), ("D", "-")]))
+
+    def kw(v):
+        m, ls = styles.get(v, ("o", "-"))
+        return {"color": colors.get(v), "marker": m, "ls": ls, "ms": 4, "label": v}
     paths = []
 
     def fig(name, title):
@@ -195,18 +230,17 @@ def plot_a7(summ: dict, out_dir: str) -> list[str]:
         plt.close(f)
 
     if summ["grid"]:
-        f, ax = fig("a7_convergence.png", "Convergence vs starting error (50 directions, 10″, 3σ residual gate)")
+        f, ax = fig("a7_convergence.png", _a7_title(summ["grid"]))
         for v, rows in summ["grid"].items():
             x = [a["size"] for a in rows]
             p = np.array([a["rate"] for a in rows])
-            ax.errorbar(x, p, yerr=[p - [a["lo"] for a in rows], [a["hi"] for a in rows] - p], fmt="o-", ms=4,
-                        capsize=3, color=colors.get(v), label=v)
+            ax.errorbar(x, p, yerr=[p - [a["lo"] for a in rows], [a["hi"] for a in rows] - p], capsize=3, **kw(v))
         ax.set_xscale("log"); ax.set_ylim(-0.03, 1.05)
         ax.set_xlabel("Starting position error (km), velocity 0.01 m/s per km"); ax.set_ylabel("Fraction converged (95% interval)")
         save(f, ax)
         f, ax = fig("a7_runtime.png", "Runtime per case vs starting error (one worker)")
         for v, rows in summ["grid"].items():
-            ax.plot([a["size"] for a in rows], [a["mean_seconds"] for a in rows], "o-", ms=4, color=colors.get(v), label=v)
+            ax.plot([a["size"] for a in rows], [a["mean_seconds"] for a in rows], **kw(v))
         ax.set_xscale("log"); ax.set_yscale("log")
         ax.set_xlabel("Starting position error (km)"); ax.set_ylabel("Mean seconds per case")
         save(f, ax)
@@ -218,7 +252,11 @@ def plot_a7(summ: dict, out_dir: str) -> list[str]:
                 ("inside_95pct_fraction", "a7_inside95.png", "Share of truths inside the 95% region", False, 0.95)):
             f, ax = fig(name, f"{ylab} vs noise (start 1,000 km / 10 m/s, 20 seeds)")
             for v, rows in summ["noise"].items():
-                ax.plot([a["noise_arcsec"] for a in rows], [a[key] for a in rows], "o-", ms=4, color=colors.get(v), label=v)
+                ax.plot([a["noise_arcsec"] for a in rows], [a[key] for a in rows], **kw(v))
+                for a in rows:                         # a point averaged over few fits says so
+                    if 0 < a["converged"] < a["runs"] and np.isfinite(a[key]):
+                        ax.annotate(f"{a['converged']}/{a['runs']} fits", (a["noise_arcsec"], a[key]), fontsize=7,
+                                    textcoords="offset points", xytext=(5, -10), color=colors.get(v))
             if ref is not None:
                 ax.axhline(ref, color="0.4", ls="--", lw=0.8)
             ax.set_xscale("log")
