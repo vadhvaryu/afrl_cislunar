@@ -33,6 +33,9 @@ A `StateEstimate` (EMI, SI) at the middle observation, with `info` listing the c
 benchmark writes `results/iod_benchmark/`: `runs.csv`, `summary.json`, `SUMMARY_tables.md`,
 `cross_check.csv`, `success_heatmap.png`, `bls_after_iod.png`, `iod_error_boxplot.png`, `runtime.png`.
 
+Figures shown at the Oct 30 meeting: `figures/2026-10-30/iod_success_heatmap.png`, `iod_bls_after_iod.png`,
+`iod_error_boxplot.png`, `iod_runtime.png`.
+
 ## d. Additional dependencies
 
 None new. The Orekit-based methods (`range_grid*` with BLS, `*_moon`, `gauss`, `laplace`, `gooding`) need
