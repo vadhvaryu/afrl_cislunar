@@ -429,3 +429,20 @@ def test_parallel_runner_recycles_workers_without_hanging(tmp_path):
     rows = parallel.run_jobs(jobs, path, key=("mode", "i"), work=_dummy_work, init=_dummy_init, init_args=("w",),
                              workers=2, max_tasks_per_child=2)
     assert sorted(int(r["i"]) for r in rows) == [i for i in range(11) if i != 3]
+
+
+def test_periselene_split_keeps_the_two_failure_bands_apart():
+    """Low periselene fails in the first band, high periselene in the second; pooled, they would cancel."""
+    rows = []
+    for k in range(40):
+        low = k < 10
+        rows.append({"size": 20_000.0, "peri_guess_8d_km": 5_000.0 + k if low else 30_000.0 + k, "failed": low and k < 8,
+                     "outcome": "iteration_limit" if low and k < 8 else "converged"})
+        high = k >= 30
+        rows.append({"size": 80_000.0, "peri_guess_8d_km": 90_000.0 + k if high else 40_000.0 + k, "failed": high,
+                     "outcome": "wrong_orbit_rejected" if high else "converged"})
+    s = cplots.periselene_split(rows, 18_749.0)
+    a, b = s["10500-40000"], s["50000-100000"]
+    assert a["failed"] == 8 and a["failures_below_truth_periselene"] == 8 and a["auc_low_periselene"] == 1.0
+    assert a["fail_rate_below_10000"] == 0.8 and a["fail_rate_above_10000"] == 0.0
+    assert b["failures_below_truth_periselene"] == 0 and b["auc_low_periselene"] == 0.0
