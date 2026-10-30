@@ -67,9 +67,11 @@ def cr3bp_force_models(sys: EarthMoonSystem) -> list:
 
 
 def propagator_builder(sys: EarthMoonSystem, t: float, r, v, max_step_s: float = 3600.0,
-                       position_tolerance_m: float = 0.01):
+                       position_tolerance_m: float = 0.01, position_scale_m: float = 1.0):
     """NumericalPropagatorBuilder starting from a Cartesian state (Cartesian, because
-    Keplerian elements mean little in cislunar space)."""
+    Keplerian elements mean little in cislunar space). position_scale_m is the scale Orekit
+    normalizes the estimated position by (velocity scale follows from it); BLS convergence is
+    tested on parameter changes in these normalized units."""
     from org.hipparchus.geometry.euclidean.threed import Vector3D
     from org.orekit.orbits import CartesianOrbit, PositionAngleType
     from org.orekit.propagation.conversion import DormandPrince853IntegratorBuilder, NumericalPropagatorBuilder
@@ -80,7 +82,7 @@ def propagator_builder(sys: EarthMoonSystem, t: float, r, v, max_step_s: float =
                            frame, t0.shiftedBy(float(t)), sys.gm_earth)
     builder = NumericalPropagatorBuilder(
         orbit, DormandPrince853IntegratorBuilder(1e-3, max_step_s, position_tolerance_m),
-        PositionAngleType.TRUE, 1.0)
+        PositionAngleType.TRUE, float(position_scale_m))
     for force in cr3bp_force_models(sys):
         builder.addForceModel(force)
     return builder

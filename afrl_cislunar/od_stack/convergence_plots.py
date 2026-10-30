@@ -1,0 +1,795 @@
+"""
+Plots and statistics for the convergence study (reads results/convergence/*.csv).
+
+    python -m od_stack.convergence_plots                  # all figures + analysis.json + SUMMARY_tables.md
+
+Figures (results/convergence/):
+    periselene_by_error.png        one panel per starting error: final error vs periselene of the guess
+    convergence_vs_periselene.png  convergence rate vs periselene of the guess (d >= 10,000 km pooled)
+    convergence_curve.png          convergence rate vs starting error, three modes
+    convergence_vs_features.png    convergence rate per bin of each candidate variable
+    threshold_hist.png             distribution of per-direction thresholds (A3)
+    threshold_vs_direction.png     threshold vs error direction (line of sight, Moon-radial)
+    direction_map.png              error direction in RIC (azimuth/elevation) colored by largest converged d
+
+Statistics (numpy/scipy only):
+    AUC     area under the ROC curve for predicting failure from one variable,
+            from scipy.stats.mannwhitneyu (0.5 = no information; > 0.5: failures have larger values)
+    logit   logistic regression of failure on standardized variables (scipy.optimize.minimize),
+            95% intervals from 200 bootstrap resamples
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import sys as _sys
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import yaml
+from scipy.optimize import minimize
+from scipy.stats import mannwhitneyu
+
+from .convergence import gated_outcome
+from .sweep import _wilson
+
+OUT_DIR = "results/convergence/orekit_bls"
+OBS_SEED = 10_000
+MIN_THRESHOLD_DIRECTIONS = 50       # fewer finished bisections (an interrupted run) are not summarized
+ESTIMATOR_LABELS = {"orekit_bls": "Plain BLS", "orekit_bls_robust": "Robust BLS"}
+COLORS = {"converged": "#004B8D", "iteration_limit": "#E69F00", "wrong_orbit": "#D55E00",
+          "wrong_orbit_rejected": "#CC79A7", "good_fit_rejected": "#56B4E9", "other_error": "#808F9C"}
+LABELS = {"converged": "Converged", "iteration_limit": "Iteration limit", "wrong_orbit": "Wrong orbit (passed gate)",
+          "wrong_orbit_rejected": "Wrong orbit (caught by 3σ gate)", "good_fit_rejected": "Good fit rejected by gate",
+          "other_error": "Other error"}
+MODE_LABELS = {"combined": "Combined (d km, 0.01·d m/s)", "position_only": "Position only",
+               "velocity_only": "Velocity only"}
+plt.rcParams.update({"font.size": 10, "axes.titlesize": 11, "figure.titlesize": 13})
+
+# Candidate explanations for failure, as (column, label). "_norm" columns are divided by the
+# position error size, so they describe the error DIRECTION independent of its size.
+FEATURES = [
+    ("size", "Starting position error d (km)"),
+    ("peri_guess_8d_km", "Periselene of guess, days 0–8 (km)"),
+    ("peri_guess_12d_km", "Periselene of guess, days 0–12 (km)"),
+    ("abs_peri_delta_8d_km", "|Periselene guess − truth|, 0–8 d (km)"),
+    ("angle_dr_los_deg", "Angle between Δr and line of sight (deg)"),
+    ("abs_los_frac", "|Δr · LOS| / |Δr| (range fraction)"),
+    ("dr_moon_radial_norm", "Δr · Moon-radial / |Δr|"),
+    ("dr_R_norm", "Δr radial (Earth) / |Δr|"),
+    ("dr_I_norm", "Δr in-track / |Δr|"),
+    ("dr_C_norm", "Δr cross-track / |Δr|"),
+    ("dv_along_v_m_s", "Δv along v (m/s)"),
+    ("abs_delta_jacobi", "|ΔC| Jacobi (nondim)"),
+    ("log_start_residual", "log10 starting residual RMS (σ)"),
+]
+LOGIT_FEATURES = ["log_size", "abs_los_frac", "dr_moon_radial_norm", "dr_C_norm", "dv_along_v_norm",
+                  "abs_delta_jacobi", "peri_guess_8d_km"]
+
+
+# ----------------------------------------------------------------------------- loading
+
+def _num(v):
+    if v in ("", None):
+        return np.nan
+    if v in ("True", "False"):
+        return v == "True"
+    try:
+        return float(v)
+    except ValueError:
+        return v
+
+
+def load(path: str) -> list[dict]:
+    if not os.path.exists(path):
+        return []
+    with open(path, newline="") as f:
+        rows = [{k: _num(v) for k, v in r.items()} for r in csv.DictReader(f)]
+    for r in rows:
+        d = r.get("position_error_km_set", np.nan)
+        dnz = d if isinstance(d, float) and d > 0 else np.nan
+        r["abs_peri_delta_8d_km"] = abs(r.get("peri_delta_8d_km", np.nan))
+        r["abs_los_frac"] = abs(r.get("dr_along_los_km", np.nan)) / dnz
+        r["dr_moon_radial_norm"] = r.get("dr_moon_radial_km", np.nan) / dnz
+        for c in "RIC":
+            r[f"dr_{c}_norm"] = r.get(f"dr_{c}_km", np.nan) / dnz
+        w = r.get("velocity_error_m_s_set", np.nan)
+        r["dv_along_v_norm"] = r.get("dv_along_v_m_s", np.nan) / w if isinstance(w, float) and w > 0 else np.nan
+        r["abs_delta_jacobi"] = abs(r.get("delta_jacobi", np.nan))
+        s = r.get("start_residual_rms_sigma", np.nan)
+        r["log_start_residual"] = np.log10(s) if isinstance(s, float) and s > 0 else np.nan
+        r["log_size"] = np.log10(r["size"]) if r.get("size", 0) > 0 else np.nan
+        if "outcome" in r and "bls_finished" in r:      # (re)apply the residual gate; older CSVs lack it
+            r.setdefault("outcome_ungated", r["outcome"])
+            r["outcome"] = gated_outcome({**r, "rms_normalized_residual": (None if not isinstance(
+                r.get("rms_normalized_residual"), float) else r["rms_normalized_residual"])})
+        r["failed"] = r.get("outcome") != "converged"
+        r["final_error_shown_km"] = (r.get("position_error_km") if r.get("bls_finished") is True
+                                     else r.get("final_state_error_km", np.nan))
+    return rows
+
+
+def estimator_label(out_dir: str) -> str:
+    """Name of the estimator a results folder was made with (from its config_used.yaml)."""
+    method = os.path.basename(os.path.normpath(out_dir))
+    try:
+        with open(os.path.join(out_dir, "config_used.yaml")) as f:
+            method = yaml.safe_load(f)["estimation"]["method"]
+    except (OSError, KeyError, TypeError):
+        pass
+    return ESTIMATOR_LABELS.get(method, method)
+
+
+def col(rows, k):
+    return np.array([r.get(k, np.nan) for r in rows], dtype=float)
+
+
+def sel(rows, **eq):
+    return [r for r in rows if all(r.get(k) == v for k, v in eq.items())]
+
+
+# ----------------------------------------------------------------------------- statistics
+
+def rate_by(rows, key):
+    out = []
+    for v in sorted({r[key] for r in rows}):
+        g = [r for r in rows if r[key] == v]
+        k = sum(not r["failed"] for r in g)
+        p, lo, hi = _wilson(k, len(g))
+        out.append({"value": v, "n": len(g), "converged": k, "rate": p, "lo": lo, "hi": hi})
+    return out
+
+
+def binned_rate(x, failed, nbins=8):
+    ok = np.isfinite(x)
+    x, failed = x[ok], failed[ok]
+    if len(x) < 2 * nbins:
+        return []
+    edges = np.unique(np.quantile(x, np.linspace(0, 1, nbins + 1)))
+    out = []
+    for a, b in zip(edges[:-1], edges[1:]):
+        m = (x >= a) & ((x < b) | (b == edges[-1]))
+        if not m.any():
+            continue
+        k = int((~failed[m]).sum())
+        p, lo, hi = _wilson(k, int(m.sum()))
+        out.append({"lo_edge": float(a), "hi_edge": float(b), "center": float(np.median(x[m])), "n": int(m.sum()),
+                    "rate": p, "lo": lo, "hi": hi})
+    return out
+
+
+def auc(x, failed):
+    """AUC for predicting failure from x (Mann-Whitney U / (n_fail * n_ok)), with its p-value."""
+    ok = np.isfinite(x)
+    a, b = x[ok & failed], x[ok & ~failed]
+    if len(a) < 3 or len(b) < 3:
+        return {"auc": np.nan, "p": np.nan, "n_failed": int(len(a)), "n_converged": int(len(b))}
+    u, p = mannwhitneyu(a, b, alternative="two-sided")
+    return {"auc": float(u / (len(a) * len(b))), "p": float(p), "n_failed": int(len(a)), "n_converged": int(len(b))}
+
+
+def _logit_fit(X, y, l2=1e-3):
+    def nll(beta):
+        z = X @ beta
+        return float(np.sum(np.logaddexp(0, z) - y * z) + l2 * beta[1:] @ beta[1:])
+
+    def grad(beta):
+        p = 1 / (1 + np.exp(-(X @ beta)))
+        g = X.T @ (p - y)
+        g[1:] += 2 * l2 * beta[1:]
+        return g
+
+    return minimize(nll, np.zeros(X.shape[1]), jac=grad, method="BFGS").x
+
+
+def logistic(rows, features, n_boot=200, seed=0):
+    """Failure ~ standardized features. Small L2 penalty keeps it finite if the data separate."""
+    X = np.column_stack([col(rows, f) for f in features])
+    y = np.array([r["failed"] for r in rows], float)
+    ok = np.all(np.isfinite(X), axis=1)
+    X, y = X[ok], y[ok]
+    if len(y) < 20 or y.min() == y.max():
+        return {"n": int(len(y)), "note": "not enough runs or no failures"}
+    mu, sd = X.mean(0), X.std(0)
+    sd[sd == 0] = 1
+    Z = np.column_stack([np.ones(len(y)), (X - mu) / sd])
+    beta = _logit_fit(Z, y)
+    rng = np.random.default_rng(seed)
+    boots = np.array([_logit_fit(Z[i], y[i]) for i in (rng.integers(0, len(y), len(y)) for _ in range(n_boot))])
+    lo, hi = np.percentile(boots, [2.5, 97.5], axis=0)
+    return {"n": int(len(y)), "n_failed": int(y.sum()), "intercept": float(beta[0]),
+            "coefficients": {f: {"beta": float(b), "lo": float(a), "hi": float(c),
+                                 "excludes_zero": bool(a > 0 or c < 0)}
+                             for f, b, a, c in zip(features, beta[1:], lo[1:], hi[1:])}}
+
+
+def non_monotonic(rows):
+    """Directions that fail at some size and converge at a larger one (per mode)."""
+    out = {}
+    for mode in sorted({r["mode"] for r in rows}):
+        bad = []
+        for k in sorted({r["direction"] for r in rows if r["mode"] == mode}):
+            g = sorted(sel(rows, mode=mode, direction=k), key=lambda r: r["size"])
+            fails = [r["size"] for r in g if r["failed"]]
+            if fails and any(not r["failed"] and r["size"] > fails[0] for r in g):
+                bad.append(int(k))
+        out[mode] = {"count": len(bad), "of": len({r["direction"] for r in rows if r["mode"] == mode}),
+                     "directions": bad}
+    return out
+
+
+def largest_converged(rows, mode):
+    out = {}
+    for k in sorted({r["direction"] for r in rows if r["mode"] == mode}):
+        g = sel(rows, mode=mode, direction=k)
+        conv = [r["size"] for r in g if not r["failed"]]
+        out[int(k)] = max(conv) if conv else 0.0
+    return out
+
+
+def robustness(all_grid):
+    rows = [r for r in all_grid if r["mode"] == "combined" and r["size"] in (15_000.0, 30_000.0)
+            and r["direction"] < 20]
+    cases, varying = {}, []
+    for r in rows:
+        cases.setdefault((r["size"], r["direction"]), []).append((int(r["obs_seed"]), r["outcome"]))
+    for (d, k), v in sorted(cases.items()):
+        if len(v) >= 5 and len({o for _, o in v}) > 1:
+            varying.append({"size_km": d, "direction": int(k), "outcomes": dict(sorted(v))})
+    complete = sum(len(v) >= 5 for v in cases.values())
+    return {"cases_with_5_seeds": complete, "outcome_depends_on_noise": len(varying), "varying": varying}
+
+
+def threshold_stats(thr):
+    out = {}
+    for mode in sorted({r["mode"] for r in thr}):
+        g = sel(thr, mode=mode)
+        t = np.array([r["threshold"] if r.get("censored") != "< 500" else 0.0 for r in g], float)
+        cens_hi = sum(r.get("censored") == ">= 100,000" for r in g)
+        out[mode] = {"directions": len(g), "median_km": float(np.median(t)), "p10_km": float(np.percentile(t, 10)),
+                     "p90_km": float(np.percentile(t, 90)), "min_km": float(t.min()), "max_km": float(t.max()),
+                     "at_least_100000": int(cens_hi), "below_500": int(sum(r.get("censored") == "< 500" for r in g)),
+                     "non_monotonic_in_bisection": int(sum(r.get("monotonic_in_evaluations") is False for r in g))}
+    return out
+
+
+# ----------------------------------------------------------------------------- figures
+
+def _legend_outcomes(ax, present, **kw):
+    for o in COLORS:
+        if o in present:
+            ax.scatter([], [], s=18, color=COLORS[o], label=LABELS[o])
+    ax.legend(**kw)
+
+
+def fig_periselene_by_error(path, rows, truth_peri):
+    sizes = sorted({r["size"] for r in rows if r["size"] >= 10_000})
+    n = len(sizes)
+    ncol = 6
+    nrow = int(np.ceil(n / ncol))
+    fig, axs = plt.subplots(nrow, ncol, figsize=(3.0 * ncol, 2.5 * nrow + 0.8), sharex=True, sharey=True,
+                            dpi=110, squeeze=False)
+    present = set()
+    for ax, d in zip(axs.flat, sizes):
+        g = [r for r in rows if r["size"] == d]
+        for r in g:
+            y = r["final_error_shown_km"]
+            if not np.isfinite(y):
+                continue
+            present.add(r["outcome"])
+            ax.scatter(r["peri_guess_8d_km"], max(y, 1.0), s=12, color=COLORS[r["outcome"]], alpha=0.85,
+                       marker="o" if r["outcome"] == "converged" else "^")
+        ax.axvline(truth_peri, color="0.3", ls="--", lw=0.8)
+        k = sum(not r["failed"] for r in g)
+        ax.set_title(f"d = {d:,.0f} km  ({k}/{len(g)})", fontsize=10)
+        ax.set_yscale("log")
+        ax.grid(alpha=0.3, which="both")
+    for ax in axs.flat[n:]:
+        ax.axis("off")
+    for ax in axs[-1]:
+        ax.set_xlabel("Periselene of guess (km)")
+    for ax in axs[:, 0]:
+        ax.set_ylabel("Final error (km)")
+    _legend_outcomes(axs.flat[0], present, fontsize=8, loc="lower right")
+    fig.suptitle("Periselene of the guess and final error at each starting error (combined mode; "
+                 f"dashed = truth periselene {truth_peri:,.0f} km; failures plotted at BLS's last iterate)")
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+PERI_BANDS = ((10_500.0, 40_000.0), (50_000.0, 100_000.0))
+
+
+def periselene_split(rows, truth_peri, bands=PERI_BANDS):
+    """Periselene of the guess vs failure, separately per band of starting error. Pooling the bands hides the
+    effect: from 10,500 to 40,000 km failures are stalls from guesses that pass close to the Moon, beyond
+    50,000 km they are wrong orbits from guesses that stay far from it."""
+    out = {}
+    for lo, hi in bands:
+        g = [r for r in rows if lo <= r["size"] <= hi]
+        if not g:
+            continue
+        f = np.array([r["failed"] for r in g])
+        p = col(g, "peri_guess_8d_km")
+        below, low = p < truth_peri, p < 10_000
+        out[f"{lo:.0f}-{hi:.0f}"] = {
+            "runs": len(g), "failed": int(f.sum()), "auc_low_periselene": 1 - auc(p, f)["auc"],
+            "failures_below_truth_periselene": int((f & below).sum()),
+            "fail_rate_below_10000": float(f[low].mean()) if low.any() else np.nan, "n_below_10000": int(low.sum()),
+            "fail_rate_above_10000": float(f[~low].mean()) if (~low).any() else np.nan,
+            "failure_kinds": {o: int(sum(r["outcome"] == o for r in g if r["failed"])) for o in COLORS if o != "converged"}}
+    return out
+
+
+def fig_periselene_strip(path, rows, truth_peri, split):
+    """One panel: every combined-mode start at d >= 10,000 km, x = starting error, y = periselene of the guess,
+    marked converged or failed."""
+    sizes = sorted({r["size"] for r in rows if r["size"] >= 10_000})
+    xi = {d: i for i, d in enumerate(sizes)}
+    rng = np.random.default_rng(0)
+    fig, ax = plt.subplots(figsize=(13, 4.8), dpi=130)
+    lo, hi = PERI_BANDS[0]
+    ax.axvspan(xi[min(d for d in sizes if d >= lo)] - 0.5, xi[max(d for d in sizes if d <= hi)] + 0.5, color="#004B8D",
+               alpha=0.05, lw=0)
+    present = set()
+    for failed in (False, True):                                   # converged first, failures drawn on top
+        for r in (r for r in rows if r["size"] >= 10_000 and r["failed"] == failed):
+            y = r["peri_guess_8d_km"]
+            if not np.isfinite(y):
+                continue
+            present.add(r["outcome"])
+            ax.scatter(xi[r["size"]] + rng.uniform(-0.28, 0.28), y / 1e3, s=16 if failed else 9,
+                       color=COLORS[r["outcome"]] if failed else "#9AA5B1", alpha=0.95 if failed else 0.45,
+                       marker="^" if failed else "o", lw=0)
+    ax.axhline(truth_peri / 1e3, color="0.25", ls="--", lw=0.9)
+    ax.annotate(f"truth periselene {truth_peri:,.0f} km", (len(sizes) - 0.6, truth_peri / 1e3), ha="right",
+                va="bottom", fontsize=9, color="0.25")
+    ax.set_xticks(range(len(sizes)))
+    ax.set_xticklabels([f"{d / 1e3:g}k" for d in sizes], fontsize=8)
+    ax.set_xlim(-0.6, len(sizes) - 0.4)
+    ax.set_xlabel("Starting position error d (combined mode: d km and 0.01·d m/s)")
+    ax.set_ylabel("Periselene of the guess, days 0–8 (1,000 km)")
+    ax.grid(alpha=0.25, axis="y")
+    handles = [plt.Line2D([], [], marker="o", ls="", color="#9AA5B1", label="Converged")]
+    handles += [plt.Line2D([], [], marker="^", ls="", color=COLORS[o], label=LABELS[o])
+                for o in COLORS if o != "converged" and o in present]
+    ax.legend(handles=handles, fontsize=8, loc="upper left")
+    s = split.get(f"{lo:.0f}-{hi:.0f}")
+    if s:
+        ax.set_title(f"From {lo:,.0f} to {hi:,.0f} km, {s['failures_below_truth_periselene']} of {s['failed']} failures "
+                     f"start from a guess that passes closer to the Moon than the truth "
+                     f"(below 10,000 km: {s['fail_rate_below_10000']:.0%} fail, above: {s['fail_rate_above_10000']:.0%})")
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _rate_panel(ax, b, color="#004B8D", label=None, x="center"):
+    if not b:
+        return
+    xs = np.array([v[x] for v in b], float)
+    p = np.array([v["rate"] for v in b])
+    ax.errorbar(xs, p, yerr=[p - [v["lo"] for v in b], [v["hi"] for v in b] - p], fmt="o-", color=color,
+                capsize=3, label=label, ms=4)
+    ax.set_ylim(-0.03, 1.05)
+    ax.grid(alpha=0.3)
+
+
+def fig_vs_periselene(path, rows, truth_peri, a):
+    fig, ax = plt.subplots(figsize=(7.5, 4.6), dpi=110)
+    b = binned_rate(col(rows, "peri_guess_8d_km"), np.array([r["failed"] for r in rows]), nbins=10)
+    _rate_panel(ax, b)
+    for v in b:
+        ax.annotate(f"n={v['n']}", (v["center"], v["rate"]), textcoords="offset points", xytext=(0, 7),
+                    ha="center", fontsize=8)
+    ax.axvline(truth_peri, color="0.3", ls="--", lw=0.8, label=f"Truth periselene ({truth_peri:,.0f} km)")
+    ax.set_xlabel("Periselene of starting guess, days 0–8 (km); bins of equal count")
+    ax.set_ylabel("Fraction converged (95% interval)")
+    verdict = "barely predicts" if abs(a["auc"] - 0.5) < 0.15 else "predicts"
+    ax.set_title(f"Periselene of the guess {verdict} failure (AUC {a['auc']:.2f}; combined, d ≥ 10,000 km)")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def fig_curve(path, grid, name="BLS"):
+    fig, axs = plt.subplots(1, 2, figsize=(13, 4.6), dpi=110)
+    ax = axs[0]
+    for mode, c in (("combined", "#004B8D"), ("position_only", "#D55E00")):
+        b = rate_by(sel(grid, mode=mode), "size")
+        _rate_panel(ax, b, color=c, label=MODE_LABELS[mode], x="value")
+    ax.set_xscale("log")
+    ax.set_xlabel("Starting position error d (km)")
+    ax.set_ylabel("Fraction converged (95% interval)")
+    ax.set_title("Position error")
+    ax.legend(fontsize=9, loc="lower left")
+    ax = axs[1]
+    b = rate_by(sel(grid, mode="velocity_only"), "size")
+    _rate_panel(ax, b, color="#E69F00", label=MODE_LABELS["velocity_only"], x="value")
+    ax.set_xscale("log")
+    ax.set_xlabel("Starting velocity error w (m/s), position exact")
+    ax.set_title("Velocity error")
+    ax.legend(fontsize=9, loc="lower left")
+    comb = rate_by(sel(grid, mode="combined"), "size")
+    perfect = max([a["value"] for a in comb if all(b["rate"] == 1 for b in comb if b["value"] <= a["value"])] or [0])
+    at = {a["value"]: a["rate"] for a in comb}
+    fig.suptitle(f"{name} converges every time up to {perfect:,.0f} km; "
+                 f"{at.get(50_000.0, float('nan')):.0%} of directions at 50,000 km, {at.get(100_000.0, float('nan')):.0%} at 100,000 km "
+                 "(combined mode; 50 directions per size, one 10″ noise draw)")
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def fig_features(path, rows, aucs):
+    n = len(FEATURES)
+    ncol = 4
+    nrow = int(np.ceil(n / ncol))
+    fig, axs = plt.subplots(nrow, ncol, figsize=(4.2 * ncol, 3.2 * nrow), dpi=110, squeeze=False, sharey=True)
+    failed = np.array([r["failed"] for r in rows])
+    for ax, (k, label) in zip(axs.flat, FEATURES):
+        _rate_panel(ax, binned_rate(col(rows, k), failed))
+        ax.set_xlabel(label)
+        ax.set_title(f"AUC {aucs[k]['auc']:.2f}", fontsize=10)
+    for ax in axs[:, 0]:
+        ax.set_ylabel("Fraction converged")
+    for ax in axs.flat[n:]:
+        ax.axis("off")
+    top = sorted(aucs, key=lambda k: -abs((aucs[k]["auc"] if np.isfinite(aucs[k]["auc"]) else 0.5) - 0.5))[:3]
+    names = dict(FEATURES)
+    fig.suptitle("Failure is best predicted by " + ", ".join(f"{names[k].split(' (')[0]} (AUC {aucs[k]['auc']:.2f})" for k in top)
+                 + "\n(convergence rate per bin; combined, d ≥ 10,000 km; 95% intervals; AUC 0.5 = no information)")
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def fig_threshold_hist(path, thr, stats):
+    fig, ax = plt.subplots(figsize=(8, 4.6), dpi=110)
+    bins = np.linspace(0, 100_000, 41)
+    for mode, c in (("combined", "#004B8D"), ("position_only", "#D55E00")):
+        g = sel(thr, mode=mode)
+        if not g:
+            continue
+        t = np.array([r["threshold"] if np.isfinite(r["threshold"]) else 0.0 for r in g])
+        s = stats[mode]
+        ax.hist(t, bins=bins, histtype="step", lw=1.8, color=c,
+                label=f"{MODE_LABELS[mode]}: median {s['median_km']:,.0f}, 10th pct {s['p10_km']:,.0f} km")
+        ax.axvline(s["median_km"], color=c, ls="-", lw=0.9)
+        ax.axvline(s["p10_km"], color=c, ls=":", lw=1.2)
+    ax.set_xlabel("Largest converged starting error (km), bisected to 250 km (100,000 = never failed)")
+    ax.set_ylabel("Directions")
+    c = stats.get("combined", next(iter(stats.values())))
+    ax.set_title(f"Bisected thresholds: median {c['median_km']:,.0f} km, 10th percentile {c['p10_km']:,.0f} km (combined).\n"
+                 "Biased high: bisection skips mid-size failures of non-monotonic directions (see grid)")
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def fig_threshold_vs_direction(path, thr, first_runs):
+    fig, axs = plt.subplots(1, 2, figsize=(13, 4.6), dpi=110, sharey=True)
+    for mode, c, m in (("combined", "#004B8D", "o"), ("position_only", "#D55E00", "^")):
+        g = sel(thr, mode=mode)
+        x1, x2, y = [], [], []
+        for r in g:
+            f = first_runs.get((mode, r["direction"]))
+            if f is None:
+                continue
+            x1.append(f["angle_dr_los_deg"])
+            x2.append(f["dr_moon_radial_norm"])
+            y.append(r["threshold"] if np.isfinite(r["threshold"]) else 0.0)
+        axs[0].scatter(x1, y, s=14, color=c, marker=m, alpha=0.7, label=MODE_LABELS[mode])
+        axs[1].scatter(x2, y, s=14, color=c, marker=m, alpha=0.7, label=MODE_LABELS[mode])
+    axs[0].set_xlabel("Angle between position error and line of sight at day 4 (deg)")
+    axs[1].set_xlabel("Moon-radial component of position error direction (−1 = toward Moon)")
+    axs[0].set_ylabel("Threshold (km)")
+    for ax in axs:
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=9)
+    fig.suptitle("Per-direction convergence threshold vs error direction")
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def fig_direction_map(path, grid):
+    fig, axs = plt.subplots(1, 2, figsize=(13, 4.8), dpi=110)
+    for ax, mode in zip(axs, ("combined", "position_only")):
+        g = sel(grid, mode=mode)
+        best = largest_converged(g, mode)
+        ref = {}
+        for r in g:
+            if r["direction"] not in ref and r["size"] > 0:
+                ref[r["direction"]] = r
+        k = sorted(ref)
+        az = [np.degrees(np.arctan2(ref[i]["dr_I_norm"], ref[i]["dr_R_norm"])) for i in k]
+        el = [np.degrees(np.arcsin(np.clip(ref[i]["dr_C_norm"], -1, 1))) for i in k]
+        sc = ax.scatter(az, el, c=[best[i] for i in k], cmap="viridis", s=40, vmin=0, vmax=100_000,
+                        edgecolor="k", lw=0.3)
+        for i, x, y in zip(k, az, el):
+            ax.annotate(str(i), (x, y), fontsize=6, xytext=(3, 3), textcoords="offset points")
+        ax.set_xlim(-180, 180)
+        ax.set_ylim(-90, 90)
+        ax.set_xlabel("Azimuth from radial toward in-track (deg)")
+        ax.set_ylabel("Elevation toward cross-track (deg)")
+        ax.set_title(MODE_LABELS[mode])
+        ax.grid(alpha=0.3)
+        fig.colorbar(sc, ax=ax, label="Largest converged d on the grid (km)")
+    fig.suptitle("Position-error direction (Earth-centered RIC at day 4) and how far it converges")
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def fig_non_monotonic(path, grid, nm):
+    dirs = nm.get("combined", {}).get("directions", [])
+    if not dirs:
+        return False
+    fig, ax = plt.subplots(figsize=(10, 0.35 * len(dirs) + 1.6), dpi=110)
+    present = set()
+    for y, k in enumerate(dirs):
+        for r in sel(grid, mode="combined", direction=float(k)):
+            present.add(r["outcome"])
+            ax.scatter(r["size"], y, s=28, color=COLORS[r["outcome"]], marker="o" if r["outcome"] == "converged" else "x")
+    ax.set_yticks(range(len(dirs)))
+    ax.set_yticklabels([f"direction {k}" for k in dirs], fontsize=9)
+    ax.set_xscale("log")
+    ax.set_xlabel("Starting position error d (km), combined mode")
+    ax.grid(alpha=0.3, which="both")
+    ax.set_title(f"{len(dirs)} of {nm['combined']['of']} directions fail at some size and converge again at a larger one")
+    _legend_outcomes(ax, present, fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1))
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def safe_numbers(grid):
+    """Per mode: largest size up to which every direction converged, and the smallest failing size."""
+    out = {}
+    for mode in sorted({r["mode"] for r in grid}):
+        g = sel(grid, mode=mode)
+        fails = sorted(r["size"] for r in g if r["failed"])
+        sizes = sorted({r["size"] for r in g})
+        out[mode] = {"smallest_failed": fails[0] if fails else None,
+                     "all_converge_up_to": max([d for d in sizes if not fails or d < fails[0]] or [None]),
+                     "failure_kinds": {o: sum(r["outcome"] == o for r in g) for o in COLORS if o != "converged"}}
+    return out
+
+
+# ----------------------------------------------------------------------------- driver
+
+def _md_rate_table(b, unit):
+    lines = [f"| Size ({unit}) | Converged | 95% interval |", "|---|---|---|"]
+    for v in b:
+        lines.append(f"| {v['value']:,.0f} | {v['converged']}/{v['n']} | {v['lo']:.2f}–{v['hi']:.2f} |")
+    return "\n".join(lines)
+
+
+def analyze(out_dir: str = OUT_DIR) -> dict:
+    all_grid = load(os.path.join(out_dir, "grid.csv"))
+    thr = load(os.path.join(out_dir, "thresholds.csv"))
+    thr_runs = load(os.path.join(out_dir, "thresholds_runs.csv"))
+    grid = [r for r in all_grid if r["obs_seed"] == OBS_SEED]
+    from .convergence_features import FeatureCalculator
+    from .frames import EarthMoonSystem
+
+    truth_peri = FeatureCalculator(EarthMoonSystem(), "data/synthetic_truth.csv").truth_periselene
+    tp8 = truth_peri["8d"]["km"]
+    res = {"truth_periselene": truth_peri, "runs": {"grid": len(grid), "all_grid_rows": len(all_grid),
+                                                     "threshold_directions": len(thr),
+                                                     "threshold_runs": len(thr_runs)}}
+
+    res["curve"] = {m: rate_by(sel(grid, mode=m), "size") for m in ("combined", "position_only", "velocity_only")}
+    res["outcomes"] = {m: {o: sum(r["outcome"] == o for r in sel(grid, mode=m)) for o in COLORS}
+                       for m in ("combined", "position_only", "velocity_only")}
+    fin = [r for r in all_grid + thr_runs if r.get("bls_finished") is True]
+    res["gate"] = {"finished_fits": len(fin),
+                   "wrong_orbit_caught": sum(r["outcome"] == "wrong_orbit_rejected" for r in fin),
+                   "wrong_orbit_passed": sum(r["outcome"] == "wrong_orbit" for r in fin),
+                   "good_fit_rejected": sum(r["outcome"] == "good_fit_rejected" for r in fin),
+                   "max_rms_of_converged": max([r["rms_normalized_residual"] for r in fin
+                                                if r["outcome"] == "converged"] or [np.nan])}
+    res["non_monotonic"] = non_monotonic(grid)
+    res["safe"] = safe_numbers(grid)
+    res["robustness"] = robustness(all_grid)
+
+    big = [r for r in sel(grid, mode="combined") if r["size"] >= 10_000]
+    big_pos = [r for r in sel(grid, mode="position_only") if r["size"] >= 10_000]
+    pooled = big + [r for r in thr_runs if r["mode"] == "combined" and r["size"] >= 10_000]
+    failed = np.array([r["failed"] for r in big])
+    res["auc_combined_d_ge_10000"] = {k: auc(col(big, k), failed) for k, _ in FEATURES}
+    if big_pos:
+        fp = np.array([r["failed"] for r in big_pos])
+        res["auc_position_only_d_ge_10000"] = {k: auc(col(big_pos, k), fp) for k, _ in FEATURES}
+    res["logit_combined_d_ge_10000"] = logistic(pooled, LOGIT_FEATURES)
+    res["periselene_split"] = periselene_split(sel(grid, mode="combined"), tp8)
+    lo, hi = PERI_BANDS[0]
+    band = [r for r in sel(grid, mode="combined") if lo <= r["size"] <= hi]
+    if sum(r["failed"] for r in band) >= 5:
+        res["logit_combined_band"] = logistic(band, LOGIT_FEATURES)
+    if 0 < len(thr) < MIN_THRESHOLD_DIRECTIONS:          # interrupted bisection: too few to summarize
+        res["thresholds_partial"] = len(thr)
+        thr = []
+    if thr:
+        res["thresholds"] = threshold_stats(thr)
+
+    figs = {}
+    if big:
+        figs["periselene_by_error"] = os.path.join(out_dir, "periselene_by_error.png")
+        fig_periselene_by_error(figs["periselene_by_error"], sel(grid, mode="combined"), tp8)
+        figs["periselene_strip"] = os.path.join(out_dir, "periselene_strip.png")
+        fig_periselene_strip(figs["periselene_strip"], sel(grid, mode="combined"), tp8, res["periselene_split"])
+        figs["convergence_vs_periselene"] = os.path.join(out_dir, "convergence_vs_periselene.png")
+        fig_vs_periselene(figs["convergence_vs_periselene"], big, tp8, res["auc_combined_d_ge_10000"]["peri_guess_8d_km"])
+        figs["convergence_vs_features"] = os.path.join(out_dir, "convergence_vs_features.png")
+        fig_features(figs["convergence_vs_features"], big, res["auc_combined_d_ge_10000"])
+    if grid:
+        figs["convergence_curve"] = os.path.join(out_dir, "convergence_curve.png")
+        fig_curve(figs["convergence_curve"], grid, estimator_label(out_dir))
+        figs["direction_map"] = os.path.join(out_dir, "direction_map.png")
+        fig_direction_map(figs["direction_map"], grid)
+        if fig_non_monotonic(os.path.join(out_dir, "non_monotonic_directions.png"), grid, res["non_monotonic"]):
+            figs["non_monotonic_directions"] = os.path.join(out_dir, "non_monotonic_directions.png")
+    if thr:
+        first = {(r["mode"], r["direction"]): r for r in thr_runs if r.get("bisection_step") == 0}
+        figs["threshold_hist"] = os.path.join(out_dir, "threshold_hist.png")
+        fig_threshold_hist(figs["threshold_hist"], thr, res["thresholds"])
+        figs["threshold_vs_direction"] = os.path.join(out_dir, "threshold_vs_direction.png")
+        fig_threshold_vs_direction(figs["threshold_vs_direction"], thr, first)
+    res["figures"] = figs
+
+    with open(os.path.join(out_dir, "analysis.json"), "w") as f:
+        json.dump(res, f, indent=2, default=lambda o: o.item() if hasattr(o, "item") else str(o))
+    with open(os.path.join(out_dir, "SUMMARY_tables.md"), "w") as f:
+        f.write(tables_markdown(res))
+    return res
+
+
+def tables_markdown(res) -> str:
+    out = ["# Convergence study: tables (generated by od_stack/convergence_plots.py)\n"]
+    for m, unit in (("combined", "km"), ("position_only", "km"), ("velocity_only", "m/s")):
+        if res["curve"][m]:
+            out += [f"## {MODE_LABELS[m]}\n", _md_rate_table(res["curve"][m], unit), ""]
+    if "thresholds_partial" in res:
+        out += ["## Per-direction thresholds (A3)\n",
+                f"Only {res['thresholds_partial']} directions finished (interrupted run); not summarized.", ""]
+    if "thresholds" in res:
+        out += ["## Per-direction thresholds (A3)\n",
+                "| Mode | Directions | Median | 10th pct | 90th pct | Min | Max | ≥ 100,000 | < 500 |",
+                "|---|---|---|---|---|---|---|---|---|"]
+        for m, s in res["thresholds"].items():
+            out.append(f"| {MODE_LABELS[m]} | {s['directions']} | {s['median_km']:,.0f} | {s['p10_km']:,.0f} | "
+                       f"{s['p90_km']:,.0f} | {s['min_km']:,.0f} | {s['max_km']:,.0f} | {s['at_least_100000']} | "
+                       f"{s['below_500']} |")
+        out.append("")
+    out += ["## AUC for predicting failure (combined, d ≥ 10,000 km)\n", "| Variable | AUC | p | failed / converged |",
+            "|---|---|---|---|"]
+    label = dict(FEATURES)
+    for k, a in sorted(res["auc_combined_d_ge_10000"].items(), key=lambda kv: -abs((kv[1]["auc"] or 0.5) - 0.5)):
+        out.append(f"| {label[k]} | {a['auc']:.3f} | {a['p']:.1e} | {a['n_failed']} / {a['n_converged']} |")
+    lg = res["logit_combined_d_ge_10000"]
+    if "coefficients" in lg:
+        out += ["", f"## Logistic regression of failure (n = {lg['n']}, {lg['n_failed']} failed; standardized)\n",
+                "| Variable | β | 95% bootstrap interval | Excludes 0 |", "|---|---|---|---|"]
+        for k, c in lg["coefficients"].items():
+            out.append(f"| {k} | {c['beta']:+.2f} | {c['lo']:+.2f} to {c['hi']:+.2f} | {'yes' if c['excludes_zero'] else 'no'} |")
+    ps = res.get("periselene_split", {})
+    if ps:
+        out += ["", "## Periselene of the guess by band of starting error (combined)\n",
+                "| Starting error (km) | Runs | Failed | AUC, low periselene predicts failure | Failures below truth "
+                "periselene | Fail rate, periselene < 10,000 km | Fail rate, ≥ 10,000 km | Failure kinds |",
+                "|---|---|---|---|---|---|---|---|"]
+        for b, v in ps.items():
+            kinds = ", ".join(f"{k} {n}" for k, n in v["failure_kinds"].items() if n)
+            out.append(f"| {b} | {v['runs']} | {v['failed']} | {v['auc_low_periselene']:.2f} | "
+                       f"{v['failures_below_truth_periselene']} | {v['fail_rate_below_10000']:.0%} "
+                       f"(n = {v['n_below_10000']}) | {v['fail_rate_above_10000']:.0%} | {kinds} |")
+    lb = res.get("logit_combined_band")
+    if lb and "coefficients" in lb:
+        lo, hi = PERI_BANDS[0]
+        out += ["", f"## Logistic regression of failure, {lo:,.0f}–{hi:,.0f} km only (n = {lb['n']}, "
+                f"{lb['n_failed']} failed; standardized)\n",
+                "| Variable | β | 95% bootstrap interval | Excludes 0 |", "|---|---|---|---|"]
+        for k, c in lb["coefficients"].items():
+            out.append(f"| {k} | {c['beta']:+.2f} | {c['lo']:+.2f} to {c['hi']:+.2f} | {'yes' if c['excludes_zero'] else 'no'} |")
+    g = res.get("gate", {})
+    if g:
+        out += ["", "## Residual gate (finished fits with RMS > 3σ count as failed)\n",
+                f"{g['finished_fits']} finished fits: {g['wrong_orbit_caught']} wrong orbits caught, "
+                f"{g['wrong_orbit_passed']} wrong orbits passed the gate, {g['good_fit_rejected']} good fits rejected. "
+                f"Largest RMS of a converged fit: {g['max_rms_of_converged']:.2f}σ."]
+    out += ["", "## Safe starting error and how runs fail (grid, 50 directions)\n",
+            "| Mode | Every direction converges up to | Smallest failing size | Iteration limit | Wrong orbit (gate) | Other |",
+            "|---|---|---|---|---|---|"]
+    for m, v in res.get("safe", {}).items():
+        k = v["failure_kinds"]
+        out.append(f"| {MODE_LABELS.get(m, m)} | {v['all_converge_up_to']:,.0f} | {v['smallest_failed'] or 0:,.0f} | "
+                   f"{k.get('iteration_limit', 0)} | {k.get('wrong_orbit_rejected', 0) + k.get('wrong_orbit', 0)} | "
+                   f"{k.get('other_error', 0)} |")
+    out += ["", "## Non-monotonic directions on the grid\n"]
+    for m, v in res["non_monotonic"].items():
+        out.append(f"- {m}: {v['count']} of {v['of']} ({v['directions']})")
+    rb = res["robustness"]
+    out += ["", f"## Noise robustness (directions 0–19 × obs seeds 10,000–10,004 at 15,000 and 30,000 km)\n",
+            f"{rb['outcome_depends_on_noise']} of {rb['cases_with_5_seeds']} (direction, size) cases change outcome "
+            "with the noise draw."]
+    for v in rb["varying"]:
+        out.append(f"- d = {v['size_km']:,.0f} km, direction {v['direction']}: {v['outcomes']}")
+    return "\n".join(out) + "\n"
+
+
+def compare(dirs: list[str], path: str) -> dict:
+    """Two or more estimators on the same grid cases: convergence vs starting error (combined and
+    position-only), and how many of the first estimator's failures each later one rescues."""
+    grids = {}
+    for d in dirs:
+        g = [r for r in load(os.path.join(d, "grid.csv")) if r["obs_seed"] == OBS_SEED]
+        grids[estimator_label(d)] = g
+    names = list(grids)
+    key = lambda r: (r["mode"], r["size"], r["direction"])
+    base = {key(r): r["failed"] for r in grids[names[0]]}
+    res = {"estimators": names, "curves": {}, "vs_first": {}}
+    for n, g in grids.items():
+        res["curves"][n] = {m: rate_by(sel(g, mode=m), "size") for m in ("combined", "position_only", "velocity_only")}
+        res["safe"] = res.get("safe", {}) | {n: safe_numbers(g)}
+        if n != names[0]:
+            both = [(base[key(r)], r["failed"]) for r in g if key(r) in base]
+            res["vs_first"][n] = {"first_failed": sum(f for f, _ in both),
+                                  "rescued": sum(f and not h for f, h in both),
+                                  "lost": sum(h and not f for f, h in both), "cases": len(both)}
+
+    shades = ["#9AA5B1", "#004B8D", "#D55E00", "#CC79A7"]
+    fig, axs = plt.subplots(1, 2, figsize=(13, 4.6), dpi=110, sharey=True)
+    for ax, mode in zip(axs, ("combined", "position_only")):
+        for n, c in zip(names, shades):
+            _rate_panel(ax, res["curves"][n][mode], color=c, label=n, x="value")
+        ax.set_xscale("log")
+        ax.set_xlabel("Starting position error d (km)")
+        ax.set_title(MODE_LABELS[mode])
+        ax.legend(fontsize=9, loc="lower left")
+    axs[0].set_ylabel("Fraction converged (95% interval)")
+    t = ", ".join(f"{n} {res['safe'][n]['combined']['all_converge_up_to']:,.0f} km" for n in names)
+    title = f"Every direction converges (combined mode) up to: {t}"
+    if len(names) > 1:
+        v = res["vs_first"][names[1]]
+        title += (f"\n{names[1]} converges in {v['rescued']} of the {v['first_failed']} grid cases {names[0]} fails "
+                  f"and fails {v['lost'] or 'none'} of those it converges (all modes, 50 directions, one 10″ noise draw)")
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+    res["figure"] = path
+    return res
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="Plots and statistics for the convergence study")
+    ap.add_argument("--out", default=OUT_DIR)
+    ap.add_argument("--compare", nargs="+", metavar="DIR",
+                    help="results folders of different estimators (first = baseline): writes "
+                         "<out>/compare_estimators.png instead of the single-estimator analysis")
+    a = ap.parse_args(argv)
+    if a.compare:
+        res = compare(a.compare, os.path.join(a.out, "compare_estimators.png"))
+        print(json.dumps({k: v for k, v in res.items() if k != "curves"}, indent=1, default=float))
+        return 0
+    res = analyze(a.out)
+    print(tables_markdown(res))
+    print("Figures:", *res["figures"].values(), sep="\n  ")
+    return 0
+
+
+if __name__ == "__main__":
+    _sys.exit(main())

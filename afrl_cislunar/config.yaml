@@ -25,10 +25,16 @@ iod:
   seed: 0
 
 estimation:
-  method: orekit_bls                   # orekit_bls | none
+  method: orekit_bls                   # orekit_bls | orekit_bls_robust | multiple_shooting | multiple_shooting_then_bls | ukf | none
   max_iterations: 50
   max_evaluations: 100
   convergence_threshold: 0.001         # Orekit's normalized-parameter convergence threshold
+  position_scale_m: 1.0                # scale Orekit normalizes position by (threshold applies to that)
+  gate_rms: null                       # e.g. 3: reject fits with residual RMS above 3 sigma (off by default)
+  # orekit_bls_robust only (see od_stack/estimation.py):
+  short_arc: [1, 2, 3]                 # fit these observations first, then all
+  restart_offsets_km: [10000, -10000, 20000, -20000]   # restarts along the line of sight
+  robust_gate_rms: 3.0                 # a full fit counts only below this residual RMS (sigma)
 
 propagator:
   method: orekit_cr3bp                 # orekit_cr3bp | cr3bp | keplerian
