@@ -129,8 +129,8 @@ direction converged there in every mode, and it matches the lowest bisection thr
 "10th percentile of the A3 threshold" (43,557 km) is not safe because of the bisection bias above. The target also
 holds for 5 of the 6 other orbits tested (below), but not for the planar L1 Lyapunov orbit.
 **With `orekit_bls_robust` the target can be relaxed to 30,000 km and 300 m/s**: every direction converged up to
-there in all three modes on the full robust grid (below). Caveat as in point 6: same 50 directions the robust
-estimator was designed on.
+there in all three modes on the full robust grid (below), and 399 of 400 converged from 15,000–40,000 km on 100
+new directions (point 6).
 
 **6. Stall or bad minimum?** About half each: 146 iteration-limit and 140 wrong-orbit failures (combined).
 Every wrong orbit had residuals far above 3σ (largest good fit: 0.94σ): over the grid and the bisections the
@@ -161,9 +161,14 @@ solution (within 0.1 m). Every direction converges up to:
   cross-track part of the error (+1.63) and a Moon-ward direction (−0.88). A high periselene of the guess now
   predicts failure (+0.81, interval +0.31 to +1.44): its remaining failures are all at ≥ 50,000 km, the wrong-orbit
   kind from guesses far from the Moon (point 3). It converges all 116 low-periselene stalls plain BLS had.
-- Caveat: the continuation was designed after seeing the plain-BLS failures on these same 50 directions, so this is
-  not an independent test. The 7 finished bisection directions (new ones) all converge up to at least 45,635 km,
-  consistent with the grid, but are too few to be a check.
+- Caveat: the continuation was designed after seeing the plain-BLS failures on these same 50 directions, so the grid
+  is not an independent test. **Out-of-sample check** (`python -m od_stack.estimator_compare new_directions`, 800
+  fits): on 100 directions never used before (ids 2000–2099), combined mode at 15,000, 20,000, 30,000 and 40,000 km,
+  robust BLS converges **399 of 400** against 345 for plain BLS. It rescues 54 of the 55 plain failures and loses
+  none; the one failure (30,000 km, direction 2002) starts from a guess whose path hits the Moon (periselene 1,737 km,
+  the lunar radius). The periselene pattern holds on these directions too: 49 of the 55 plain failures start below
+  the truth's periselene, and guesses within 10,000 km of the Moon fail 47% of the time against 5% otherwise
+  (AUC 0.85).
 
 Other measured facts:
 - **Noise draw:** 0 of 40 (direction, size) cases change outcome across 5 noise draws: failure depends on the

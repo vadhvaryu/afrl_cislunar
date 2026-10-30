@@ -53,6 +53,11 @@ PIPELINES = {
 A7_DIRS, A7_KM = range(0, 50), (1_000.0, 10_000.0, 15_000.0, 20_000.0, 30_000.0, 50_000.0, 100_000.0)
 A7_NOISE, A7_SEEDS = (1.0, 10.0, 100.0), range(0, 20)
 
+# Out-of-sample check of orekit_bls_robust: directions never used anywhere else (its arc continuation was
+# designed after seeing plain-BLS failures on grid directions 0-49), in the band it claims to fix.
+NEW_DIRS, NEW_KM = range(2000, 2100), (15_000.0, 20_000.0, 30_000.0, 40_000.0)
+NEW_VARIANTS = {"plain": {"method": "orekit_bls"}, "robust": {"method": "orekit_bls_robust"}}
+
 
 # ----------------------------------------------------------------------------- worker side
 
@@ -283,7 +288,7 @@ def run_study(cfg, variants, jobs, out_dir, workers=None):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Compare estimator variants on the same cases")
-    ap.add_argument("study", choices=["settings", "a7"])
+    ap.add_argument("study", choices=["settings", "a7", "new_directions"])
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--workers", type=int)
     ap.add_argument("--best", help="variant for the low-noise check (default: best on the grid)")
@@ -305,6 +310,9 @@ def main(argv=None) -> int:
         summ = run_study(cfg, {**SETTINGS}, jobs + noise_jobs(pick, NOISE_LEVELS, NOISE_SEEDS), out, a.workers)
         print(markdown(summ))
         print(f"Best grid variant: {best_variant(summ) if summ['grid'] else best}")
+    if a.study == "new_directions":
+        summ = run_study(cfg, NEW_VARIANTS, grid_jobs(NEW_VARIANTS, NEW_DIRS, NEW_KM), out, a.workers)
+        print(markdown(summ))
     if a.study == "a7":
         jobs = grid_jobs(PIPELINES, A7_DIRS, A7_KM) + noise_jobs(PIPELINES, A7_NOISE, A7_SEEDS)
         summ = run_study(cfg, PIPELINES, jobs, out, a.workers)
