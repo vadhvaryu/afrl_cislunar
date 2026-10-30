@@ -297,8 +297,75 @@ def fig_periselene_by_error(path, rows, truth_peri):
     for ax in axs[:, 0]:
         ax.set_ylabel("Final error (km)")
     _legend_outcomes(axs.flat[0], present, fontsize=8, loc="lower right")
-    fig.suptitle("Converged and failed starts overlap in periselene at every starting error (combined mode; "
+    fig.suptitle("Periselene of the guess and final error at each starting error (combined mode; "
                  f"dashed = truth periselene {truth_peri:,.0f} km; failures plotted at BLS's last iterate)")
+    fig.tight_layout()
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+PERI_BANDS = ((10_500.0, 40_000.0), (50_000.0, 100_000.0))
+
+
+def periselene_split(rows, truth_peri, bands=PERI_BANDS):
+    """Periselene of the guess vs failure, separately per band of starting error. Pooling the bands hides the
+    effect: from 10,500 to 40,000 km failures are stalls from guesses that pass close to the Moon, beyond
+    50,000 km they are wrong orbits from guesses that stay far from it."""
+    out = {}
+    for lo, hi in bands:
+        g = [r for r in rows if lo <= r["size"] <= hi]
+        if not g:
+            continue
+        f = np.array([r["failed"] for r in g])
+        p = col(g, "peri_guess_8d_km")
+        below, low = p < truth_peri, p < 10_000
+        out[f"{lo:.0f}-{hi:.0f}"] = {
+            "runs": len(g), "failed": int(f.sum()), "auc_low_periselene": 1 - auc(p, f)["auc"],
+            "failures_below_truth_periselene": int((f & below).sum()),
+            "fail_rate_below_10000": float(f[low].mean()) if low.any() else np.nan, "n_below_10000": int(low.sum()),
+            "fail_rate_above_10000": float(f[~low].mean()) if (~low).any() else np.nan,
+            "failure_kinds": {o: int(sum(r["outcome"] == o for r in g if r["failed"])) for o in COLORS if o != "converged"}}
+    return out
+
+
+def fig_periselene_strip(path, rows, truth_peri, split):
+    """One panel: every combined-mode start at d >= 10,000 km, x = starting error, y = periselene of the guess,
+    marked converged or failed."""
+    sizes = sorted({r["size"] for r in rows if r["size"] >= 10_000})
+    xi = {d: i for i, d in enumerate(sizes)}
+    rng = np.random.default_rng(0)
+    fig, ax = plt.subplots(figsize=(13, 4.8), dpi=130)
+    lo, hi = PERI_BANDS[0]
+    ax.axvspan(xi[min(d for d in sizes if d >= lo)] - 0.5, xi[max(d for d in sizes if d <= hi)] + 0.5, color="#004B8D",
+               alpha=0.05, lw=0)
+    present = set()
+    for failed in (False, True):                                   # converged first, failures drawn on top
+        for r in (r for r in rows if r["size"] >= 10_000 and r["failed"] == failed):
+            y = r["peri_guess_8d_km"]
+            if not np.isfinite(y):
+                continue
+            present.add(r["outcome"])
+            ax.scatter(xi[r["size"]] + rng.uniform(-0.28, 0.28), y / 1e3, s=16 if failed else 9,
+                       color=COLORS[r["outcome"]] if failed else "#9AA5B1", alpha=0.95 if failed else 0.45,
+                       marker="^" if failed else "o", lw=0)
+    ax.axhline(truth_peri / 1e3, color="0.25", ls="--", lw=0.9)
+    ax.annotate(f"truth periselene {truth_peri:,.0f} km", (len(sizes) - 0.6, truth_peri / 1e3), ha="right",
+                va="bottom", fontsize=9, color="0.25")
+    ax.set_xticks(range(len(sizes)))
+    ax.set_xticklabels([f"{d / 1e3:g}k" for d in sizes], fontsize=8)
+    ax.set_xlim(-0.6, len(sizes) - 0.4)
+    ax.set_xlabel("Starting position error d (combined mode: d km and 0.01·d m/s)")
+    ax.set_ylabel("Periselene of the guess, days 0–8 (1,000 km)")
+    ax.grid(alpha=0.25, axis="y")
+    handles = [plt.Line2D([], [], marker="o", ls="", color="#9AA5B1", label="Converged")]
+    handles += [plt.Line2D([], [], marker="^", ls="", color=COLORS[o], label=LABELS[o])
+                for o in COLORS if o != "converged" and o in present]
+    ax.legend(handles=handles, fontsize=8, loc="upper left")
+    s = split.get(f"{lo:.0f}-{hi:.0f}")
+    if s:
+        ax.set_title(f"From {lo:,.0f} to {hi:,.0f} km, {s['failures_below_truth_periselene']} of {s['failed']} failures "
+                     f"start from a guess that passes closer to the Moon than the truth "
+                     f"(below 10,000 km: {s['fail_rate_below_10000']:.0%} fail, above: {s['fail_rate_above_10000']:.0%})")
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
@@ -547,6 +614,11 @@ def analyze(out_dir: str = OUT_DIR) -> dict:
         fp = np.array([r["failed"] for r in big_pos])
         res["auc_position_only_d_ge_10000"] = {k: auc(col(big_pos, k), fp) for k, _ in FEATURES}
     res["logit_combined_d_ge_10000"] = logistic(pooled, LOGIT_FEATURES)
+    res["periselene_split"] = periselene_split(sel(grid, mode="combined"), tp8)
+    lo, hi = PERI_BANDS[0]
+    band = [r for r in sel(grid, mode="combined") if lo <= r["size"] <= hi]
+    if sum(r["failed"] for r in band) >= 5:
+        res["logit_combined_band"] = logistic(band, LOGIT_FEATURES)
     if 0 < len(thr) < MIN_THRESHOLD_DIRECTIONS:          # interrupted bisection: too few to summarize
         res["thresholds_partial"] = len(thr)
         thr = []
@@ -557,6 +629,8 @@ def analyze(out_dir: str = OUT_DIR) -> dict:
     if big:
         figs["periselene_by_error"] = os.path.join(out_dir, "periselene_by_error.png")
         fig_periselene_by_error(figs["periselene_by_error"], sel(grid, mode="combined"), tp8)
+        figs["periselene_strip"] = os.path.join(out_dir, "periselene_strip.png")
+        fig_periselene_strip(figs["periselene_strip"], sel(grid, mode="combined"), tp8, res["periselene_split"])
         figs["convergence_vs_periselene"] = os.path.join(out_dir, "convergence_vs_periselene.png")
         fig_vs_periselene(figs["convergence_vs_periselene"], big, tp8, res["auc_combined_d_ge_10000"]["peri_guess_8d_km"])
         figs["convergence_vs_features"] = os.path.join(out_dir, "convergence_vs_features.png")
@@ -610,6 +684,25 @@ def tables_markdown(res) -> str:
         out += ["", f"## Logistic regression of failure (n = {lg['n']}, {lg['n_failed']} failed; standardized)\n",
                 "| Variable | β | 95% bootstrap interval | Excludes 0 |", "|---|---|---|---|"]
         for k, c in lg["coefficients"].items():
+            out.append(f"| {k} | {c['beta']:+.2f} | {c['lo']:+.2f} to {c['hi']:+.2f} | {'yes' if c['excludes_zero'] else 'no'} |")
+    ps = res.get("periselene_split", {})
+    if ps:
+        out += ["", "## Periselene of the guess by band of starting error (combined)\n",
+                "| Starting error (km) | Runs | Failed | AUC, low periselene predicts failure | Failures below truth "
+                "periselene | Fail rate, periselene < 10,000 km | Fail rate, ≥ 10,000 km | Failure kinds |",
+                "|---|---|---|---|---|---|---|---|"]
+        for b, v in ps.items():
+            kinds = ", ".join(f"{k} {n}" for k, n in v["failure_kinds"].items() if n)
+            out.append(f"| {b} | {v['runs']} | {v['failed']} | {v['auc_low_periselene']:.2f} | "
+                       f"{v['failures_below_truth_periselene']} | {v['fail_rate_below_10000']:.0%} "
+                       f"(n = {v['n_below_10000']}) | {v['fail_rate_above_10000']:.0%} | {kinds} |")
+    lb = res.get("logit_combined_band")
+    if lb and "coefficients" in lb:
+        lo, hi = PERI_BANDS[0]
+        out += ["", f"## Logistic regression of failure, {lo:,.0f}–{hi:,.0f} km only (n = {lb['n']}, "
+                f"{lb['n_failed']} failed; standardized)\n",
+                "| Variable | β | 95% bootstrap interval | Excludes 0 |", "|---|---|---|---|"]
+        for k, c in lb["coefficients"].items():
             out.append(f"| {k} | {c['beta']:+.2f} | {c['lo']:+.2f} to {c['hi']:+.2f} | {'yes' if c['excludes_zero'] else 'no'} |")
     g = res.get("gate", {})
     if g:

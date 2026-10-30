@@ -50,6 +50,7 @@ all variables), `config_used.yaml`, `analysis.json`, `SUMMARY_tables.md` and the
 
 Figures shown at the Oct 30 meeting: `figures/2026-10-30/` (convergence_curve, periselene_by_error,
 convergence_vs_features, non_monotonic_directions, threshold_hist, orbits_convergence, plain_vs_robust_bls,
+periselene_strip,
 a7_convergence, a7_nees, a7_runtime).
 
 ## d. Additional dependencies
@@ -89,11 +90,20 @@ failure (10,500 km).
 **2. Position or velocity?** At large errors, mostly the velocity: at 50,000 km, position alone converges
 50/50, adding the matching 500 m/s drops it to 38/50. Below 40,000 km both contribute about equally.
 
-**3. Does periselene explain the failures?** No. On its own it barely predicts failure (AUC 0.58), and with the
-other variables in the regression its coefficient is zero (95% interval −0.34 to +0.22). Converged and failed
-starts overlap in periselene at every starting error (`periselene_by_error.png`).
+**3. Does periselene explain the failures?** **Yes, from 10,500 to 40,000 km**, the band right past the target
+(`periselene_strip.png`). There 116 of the 120 failures started from a guess that passes closer to the Moon than
+the truth does (18,749 km). Guesses with a periselene under 10,000 km fail 42% of the time (78 of 187), the rest 4%.
+Periselene alone separates failures from successes with AUC 0.90, and it stays the strongest variable in the
+regression for that band (β −2.79, 95% interval −4.97 to −2.11). These failures are stalls: 117 of the 120 hit the
+iteration limit. **Beyond 50,000 km it is a different failure**: wrong orbits (137 of 167) from guesses that stay
+far from the Moon (only 1 failure below the truth's periselene).
 
-**4. What does?** The size of the error first, then its direction relative to the Moon. Errors pointing toward
+_Correction:_ an earlier version of this answer said "No" (AUC 0.58, regression coefficient zero). That pooled all
+errors from 10,000 to 100,000 km, which mixes the two failure types with opposite periselene and cancels the
+effect. The fix: arc continuation in `orekit_bls_robust` converges all 116 of these low-periselene failures
+(round 2, below).
+
+**4. What else?** Pooled over 10,000–100,000 km: the size of the error first, then its direction relative to the Moon. Errors pointing toward
 the Moon converge ~62% of the time, ~90% otherwise. The Jacobi constant change predicts failure about as well as
 the error size (AUC 0.82 each), but mostly because it grows with the size. The range along the line of sight is not
 the culprit. Logistic regression of failure (standardized coefficients, 95% bootstrap intervals):
@@ -109,7 +119,10 @@ the culprit. Logistic regression of failure (standardized coefficients, 95% boot
 | periselene of the guess | −0.02 (−0.34 to +0.22), none | +0.12 (−0.03 to +0.25), none |
 
 The bisection runs cluster near each direction's threshold, which shifts the weights; both fits agree that size and
-a Moon-ward direction matter and that periselene and the line of sight do not.
+a Moon-ward direction matter and that the line of sight does not. The Moon-ward direction and a low periselene
+go together (correlation 0.58: an error toward the Moon makes the guess pass closer to it). Restricted to
+10,500–40,000 km, the regression gives periselene −2.79, Moon-radial direction −2.19 and Jacobi change +2.46, all
+with intervals excluding zero; the size of the error no longer matters inside that band (+0.29, −0.29 to +0.81).
 
 **5. Recommended IOD accuracy target for David and Mack:** within **10,000 km and 100 m/s** of the truth. Every
 direction converged there in every mode, and it matches the lowest bisection threshold (9,453 km). The brief's
@@ -136,7 +149,7 @@ solution (within 0.1 m). Every direction converges up to:
 
 - **It removes the stalls.** Plain BLS failed 280 times at the iteration limit; robust BLS never does. All 163 of its
   failures (over all 4,510 runs) end with no fit passing the 3σ gate, so it never returns a wrong orbit. Arc continuation (fit
-  the first 3 observations, days 0–4, then all 5) does almost all of the work: 4,053 of its 4,347 converged fits;
+  the middle 3 observations, days 2–6, then all 5) does almost all of the work: 4,053 of its 4,347 converged fits;
   plain BLS 199; the ±10,000/±20,000 km line-of-sight restarts 95.
 - **It helps the velocity, not the far position errors.** Past 40,000 km position-only it converges exactly the
   same cases as plain BLS; the gains are in combined and velocity-only errors.
@@ -145,9 +158,9 @@ solution (within 0.1 m). Every direction converges up to:
   every restart (up to ~7 minutes). The bisection (A3) was stopped after 7 of 400 directions (~8 hours projected);
   it is not summarized.
 - **What predicts its failures** (regression, combined, d ≥ 10,000 km): the size of the error (β +2.54), the
-  cross-track part of the error (+1.63) and a Moon-ward direction (−0.88). Periselene of the guess now has a small
-  effect (+0.81, interval +0.31 to +1.44), likely because the remaining failures are all at ≥ 50,000 km, where
-  large errors also move the periselene; it is still not the main variable.
+  cross-track part of the error (+1.63) and a Moon-ward direction (−0.88). A high periselene of the guess now
+  predicts failure (+0.81, interval +0.31 to +1.44): its remaining failures are all at ≥ 50,000 km, the wrong-orbit
+  kind from guesses far from the Moon (point 3). It converges all 116 low-periselene stalls plain BLS had.
 - Caveat: the continuation was designed after seeing the plain-BLS failures on these same 50 directions, so this is
   not an independent test. The 7 finished bisection directions (new ones) all converge up to at least 45,635 km,
   consistent with the grid, but are too few to be a check.
