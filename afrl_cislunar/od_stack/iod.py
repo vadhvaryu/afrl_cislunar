@@ -186,3 +186,23 @@ IOD_METHODS = {
     "gauss": OrekitGauss,
     "laplace": OrekitLaplace,
 }
+
+
+# Part B: IOD methods that work in the Earth-Moon three-body problem. Imported here, after
+# IODFailure and the Orekit base class exist, because those modules import them from this one.
+from .iod_cr3bp_dc import CR3BPDifferentialCorrection  # noqa: E402
+from .iod_halo_catalog import HaloCatalogIOD  # noqa: E402
+from .iod_laplace import GoodingMoon, LaplaceMoon, PerturbedLaplace  # noqa: E402
+from .iod_range_grid import RangeGridFD, RangeRateGrid  # noqa: E402
+
+IOD_METHODS.update({
+    "cr3bp_dc": CR3BPDifferentialCorrection,
+    "perturbed_laplace": PerturbedLaplace,
+    "laplace_moon": LaplaceMoon,
+    "gooding_moon": GoodingMoon,
+    "range_grid": RangeRateGrid,
+    "range_grid_fd": RangeGridFD,
+    "halo_catalog": HaloCatalogIOD,
+})
+PART_B_METHODS = ("cr3bp_dc", "perturbed_laplace", "laplace_moon", "gooding_moon", "range_grid", "range_grid_fd",
+                  "halo_catalog")
