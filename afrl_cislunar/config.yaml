@@ -1,50 +1,235 @@
-# Scenario for the IOD -> estimation -> propagation -> results stack.
-# Swap a module by changing one name below (or with --iod / --propagator).
-# Each module ignores settings meant for other modules.
+# =====================================================================================
+# config.yaml: every setting for the whole simulation stack, in pipeline order.
+#
+#   raw data -> observations -> IOD (subset) -> orbit -> PropagatorBuilder
+#            -> BatchLSEstimator -> propagator -> orbit(t) -> results / graphs
+#
+# Who reads what:
+#   python obs_generator.py            system, generator, data
+#   python -m od_stack.run             system, data, iod, propagator_builder, estimation,
+#                                      propagator, output, orekit
+#   python -m od_stack.sweep           everything run.py reads, plus sweeps
+#   python -m od_stack.convergence     everything run.py reads, plus convergence
+#
+# How the stage blocks (iod, estimation, propagator) work:
+#   method: picks the method. Settings directly under the block are shared by every
+#   method. A sub-block named after a method holds settings for that method only, and
+#   it is ignored unless that method is picked. So you can keep settings for several
+#   methods here and switch between them by changing one word. Don't put the same
+#   setting in both places: if you do, the shared one wins.
+#
+# Lines marked DECISION are choices the team has not settled yet. The value shown is
+# what the code did before this file was broadened, so results do not change until
+# someone changes it on purpose.
+# =====================================================================================
 
-system:                 # must match obs_generator.py
-  mu: 0.0121505
-  du_km: 384338.0
-  tu_s: 375099.0
 
+# -------------------------------------------------------------------------------------
+# 0. The Earth-Moon system (CR3BP units). Shared by every script, so the generator and
+#    the OD stack can never disagree.
+# -------------------------------------------------------------------------------------
+system:
+  mu: 0.0121505            # Moon mass / (Earth + Moon mass)
+  du_km: 384338.0          # 1 distance unit = Earth-Moon distance [km]
+  tu_s: 375099.0           # 1 time unit [s] (2*pi time units = one lunar month)
+
+
+# -------------------------------------------------------------------------------------
+# 1. RAW DATA: the synthetic telescope (obs_generator.py). It writes the two files in
+#    `data:` below. Skip this stage when you have real observations.
+# -------------------------------------------------------------------------------------
+generator:
+  truth_state: [0.872763, 0.0, 0.190505, 0.0, 0.235988, 0.0]   # [x,y,z,vx,vy,vz] rotating frame, CR3BP units (L1 northern halo)
+  n_obs: 5                 # number of observations (IOD needs at least 3)
+  span_days: 8.0           # first to last observation (the halo period is ~9.6 days)
+  noise_arcsec: 10.0       # 1-sigma noise on each angle (the paper uses 10")
+  seed: 1                  # random seed for the noise, so the same file comes out every time
+  rtol: 1.0e-12            # integrator tolerances for the truth orbit
+  atol: 1.0e-12
+  figure: figures/synthetic_obs.png
+  show_plot: true          # set false when running headless (e.g. in Docker)
+
+
+# -------------------------------------------------------------------------------------
+# 2. OBSERVATIONS: files turned into an Observations object (od_stack/sources.py).
+#    Each row: time, RA, Dec, 1-sigma noise; observer at Earth's center unless the file
+#    has obs_x_km / obs_y_km / obs_z_km columns.
+# -------------------------------------------------------------------------------------
 data:
   observations: data/synthetic_obs.csv
-  truth: data/synthetic_truth.csv      # answer key; remove for real data
+  truth: data/synthetic_truth.csv      # answer key, used only for grading; set to null for real data
 
+
+# -------------------------------------------------------------------------------------
+# 3. IOD (initial orbit determination): a first-guess orbit from a few observations.
+#    Output: one state (position + velocity) at one observation time.
+# -------------------------------------------------------------------------------------
 iod:
-  method: truth_plus_error             # truth_plus_error (test stand-in) | cr3bp_dc | range_grid | range_grid_fd | halo_catalog | perturbed_laplace | laplace_moon | gooding_moon | gooding | gauss | laplace
+  # DECISION: which IOD method is the default. truth_plus_error is a test stand-in that
+  # reads the answer key. IOD_METHODS.md recommends range_grid. The convergence study
+  # needs truth_plus_error, because it sets the starting error on purpose.
+  method: truth_plus_error   # truth_plus_error | range_grid | range_grid_fd | halo_catalog | cr3bp_dc
+                             # | perturbed_laplace | laplace_moon | gooding_moon | gooding | gauss | laplace
 
-  # gooding / gauss / laplace (Orekit, two-body)
-  obs_indices: [0, 2, 4]               # which 3 observations to use
-  range_guess_km: [350000, 350000]     # gooding only: guessed distance at obs 1 and 3
+  # Shared: the "subset" of observations the 3-observation methods use.
+  obs_indices: [0, 2, 4]   # used by gauss, laplace, gooding, *_moon, perturbed_laplace, cr3bp_dc
 
-  # truth_plus_error (reads the answer key; for testing the rest of the stack only)
-  epoch_index: 2                       # which observation time the estimate is at
-  position_error_km: 1000
-  velocity_error_m_s: 10
-  seed: 0
+  truth_plus_error:        # test stand-in: truth + a chosen error (reads the answer key)
+    epoch_index: 2         # which observation time the estimate is at
+    position_error_km: 1000
+    velocity_error_m_s: 10
+    seed: 0                # picks the error direction
 
+  gooding:                 # Orekit, two-body about Earth (baseline)
+    range_guess_km: [350000, 350000]   # guessed distance at observations 1 and 3
+
+  gauss: {}                # Orekit, two-body about Earth (baseline); no extra settings
+  laplace: {}              # Orekit, two-body about Earth (baseline); no extra settings
+
+  laplace_moon:            # Orekit's IodLaplace about the Moon
+    time_unit_s: null      # null = use system.tu_s (Laplace fails in SI on cislunar arcs)
+    length_unit_m: null    # null = use system.du_km
+    all_roots: true        # keep every root (Orekit keeps only the largest, a false root here)
+
+  gooding_moon:            # Orekit's IodGooding about the Moon, tried from several range guesses
+    range_guesses_km: [[350000, 350000], [300000, 300000], [400000, 400000], [250000, 450000], [450000, 250000]]
+    directions: [true]     # true = prograde transfer
+
+  perturbed_laplace:       # Laplace with Earth + Moon gravity (iod_laplace.py)
+    rho_min_km: 1000       # range search interval for the range equation
+    rho_max_km: 1000000
+    n_grid: 4000           # points used to find every root in that interval
+
+  cr3bp_dc:                # differential correction in the CR3BP (iod_cr3bp_dc.py)
+    alpha0_km: null        # a single starting range; null = sweep the range below
+    alpha0_range_km: [200000, 500000]
+    alpha0_step_km: 10000
+    seeds: [paper, lagrange]   # starting-velocity recipes to try
+    trust_region: true     # bounded least-squares fallback if Newton fails
+    tr_max_nfev: 40
+    tol: 1.0e-12
+    accept_tol: 1.0e-9
+    max_iter: 50
+    min_range_km: 20000    # reject solutions outside these limits
+    max_range_km: 1500000
+    max_speed_km_s: 3.0
+    dedup_km: 100          # solutions closer than this count as the same
+    verify: true
+    fit_gate_sigma: 3.0    # keep only solutions that fit all observations within 3 sigma
+
+  range_grid:              # (range, range-rate) grid, best candidates refined (iod_range_grid.py)
+    rho_min_km: 200000
+    rho_max_km: 500000
+    rho_step_km: 7500
+    rho_dot_min_km_s: -1.5
+    rho_dot_max_km_s: 1.5
+    rho_dot_step_km_s: 0.15
+    include_fd: true
+    top_k: 5               # how many of the best grid points are refined
+    min_separation_km: 20000
+    info_top_rows: 20
+    refine_with: orekit_bls        # estimator used to refine each candidate
+    refine_options: {}             # settings for that estimator (same names as in `estimation:`)
+    gate_rms: 3.0                  # a refined candidate must fit within 3 sigma
+    dedupe_km: 100
+    prefilter_step_tau: 0.002
+
+  range_grid_fd:           # range-only grid, velocity from finite differences
+    alpha_min_km: 200000
+    alpha_max_km: 500000
+    alpha_step_km: 10000
+    prefilter_top: 8
+    refine_with: orekit_bls
+    refine_options: {}
+    gate_rms: 3.0
+    dedupe_km: 100
+    prefilter_step_tau: 0.002
+
+  halo_catalog:            # match against a precomputed L1 northern halo family
+    n_refine: 8
+    top_k: 5
+    max_rms_arcsec: 7200
+    catalog_path: null     # null = results/halo_catalog/L1N.npz (built on first use)
+
+
+# -------------------------------------------------------------------------------------
+# 4. PROPAGATOR BUILDER: the "recipe" Orekit uses to build a propagator. One recipe is
+#    shared by the batch least squares fit (step 5) and the orekit_cr3bp propagator
+#    (step 6), so the fit and the final trajectory always use the same model.
+#    Force model: Earth point mass + circular CR3BP Moon (od_stack/orekit_models.py).
+# -------------------------------------------------------------------------------------
+propagator_builder:
+  min_step_s: 0.001        # Dormand-Prince 8(5,3) smallest step [s]
+  max_step_s: 3600.0       # largest step [s]
+  position_tolerance_m: 0.01   # integration accuracy target [m]
+  # DECISION (later): MODEL_MISMATCH.md recommends Earth + DE440 Moon + Sun for real data.
+  # That needs new force-model code in orekit_models.py before it can be a setting here.
+
+
+# -------------------------------------------------------------------------------------
+# 5. ESTIMATION (BatchLSEstimator): refine the IOD orbit using ALL observations.
+#    Output: improved state + its 6x6 covariance.
+# -------------------------------------------------------------------------------------
 estimation:
-  method: orekit_bls                   # orekit_bls | orekit_bls_robust | multiple_shooting | multiple_shooting_then_bls | ukf | none
+  # DECISION: CONVERGENCE.md recommends orekit_bls_robust as the default.
+  method: orekit_bls       # orekit_bls | orekit_bls_robust | multiple_shooting
+                           # | multiple_shooting_then_bls | ukf | none
+
+  # Shared by every Orekit BLS variant (orekit_bls, orekit_bls_robust, multiple_shooting_then_bls)
+  optimizer: levenberg_marquardt   # levenberg_marquardt | gauss_newton
   max_iterations: 50
   max_evaluations: 100
-  convergence_threshold: 0.001         # Orekit's normalized-parameter convergence threshold
-  position_scale_m: 1.0                # scale Orekit normalizes position by (threshold applies to that)
-  gate_rms: null                       # e.g. 3: reject fits with residual RMS above 3 sigma (off by default)
-  # orekit_bls_robust only (see od_stack/estimation.py):
-  short_arc: [1, 2, 3]                 # fit these observations first, then all
-  restart_offsets_km: [10000, -10000, 20000, -20000]   # restarts along the line of sight
-  robust_gate_rms: 3.0                 # a full fit counts only below this residual RMS (sigma)
+  convergence_threshold: 0.001     # Orekit's normalized-parameter convergence threshold
+  position_scale_m: 1.0            # scale Orekit normalizes position by (threshold applies to that)
+  gate_rms: null                   # e.g. 3: reject fits with residual RMS above 3 sigma (off by default)
 
+  orekit_bls_robust:
+    short_arc: [1, 2, 3]           # fit these observations first, then all
+    restart_offsets_km: [10000, -10000, 20000, -20000]   # restarts along the line of sight
+    robust_gate_rms: 3.0           # a full fit counts only below this residual RMS (sigma)
+
+  multiple_shooting:               # CR3BP multiple shooting (estimators_cr3bp.py)
+    segments: 4
+    continuity_weights: [1.0e+6, 1.0e+10, 1.0e+14]
+    max_nfev: 100
+    max_defect: 1.0e-8
+
+  multiple_shooting_then_bls:      # multiple shooting, then Orekit BLS from its answer
+    segments: 4
+    continuity_weights: [1.0e+6, 1.0e+10, 1.0e+14]
+    max_nfev: 100
+    max_defect: 1.0e-8
+
+  ukf:                             # unscented Kalman filter in the CR3BP
+    initial_sigma_km: 10000
+    initial_sigma_m_s: 100
+    q_nondim: 1.0e-18              # process noise
+
+
+# -------------------------------------------------------------------------------------
+# 6. PROPAGATOR: carry the estimated state over the whole time span -> orbit(t).
+# -------------------------------------------------------------------------------------
 propagator:
-  method: orekit_cr3bp                 # orekit_cr3bp | cr3bp | keplerian
+  method: orekit_cr3bp     # orekit_cr3bp (uses propagator_builder) | cr3bp (scipy) | keplerian (Earth only)
 
+  cr3bp:
+    rtol: 1.0e-12
+    atol: 1.0e-12
+
+
+# -------------------------------------------------------------------------------------
+# 7. RESULTS: files and graphs written by od_stack/results.py.
+# -------------------------------------------------------------------------------------
 output:
   dir: results
-  dense_points: 800
-  propagate_covariance: true           # carry the BLS covariance over the whole span (12 extra propagations)
-  confidence_level: 0.95               # size of the confidence region reported in summary.json
+  dense_points: 800                # points on the plotted trajectory
+  propagate_covariance: true       # carry the BLS covariance over the whole span (12 extra propagations)
+  confidence_level: 0.95           # size of the confidence region reported in summary.json
 
+
+# -------------------------------------------------------------------------------------
+# Studies built on the stack
+# -------------------------------------------------------------------------------------
 sweeps:                                # python -m od_stack.sweep   (Monte Carlo; see od_stack/sweep.py)
   dir: results/sweeps
   seeds: 20                            # runs per setting
@@ -57,6 +242,30 @@ sweeps:                                # python -m od_stack.sweep   (Monte Carlo
   threshold_reference_noise_arcsec: 10 # ... scaled up by noise / 10" above 10" (good-fit error grows with noise)
   check_points: 100                    # times used to measure max error over the span
 
+convergence:                           # python -m od_stack.convergence {pilot|grid|robustness|thresholds|all}
+  out_dir: results/convergence         # + /<estimator name>
+  noise_arcsec: 10.0
+  obs_seed: 10000                      # noise realization used for the main grid
+  velocity_m_s_per_km: 0.01            # "combined" mode: m/s of velocity error per km of position error
+  gate_rms_sigma: 3.0                  # a finished fit above this residual RMS counts as failed
+  grid_km: [1000, 5000, 7500, 10000, 10500, 11000, 11500, 12000, 12500, 13000, 13500, 14000, 14500, 15000,
+            16000, 17000, 18000, 19000, 20000, 21000, 22000, 23000, 24000, 25000, 26000, 27000, 28000,
+            29000, 30000, 40000, 50000, 60000, 70000, 80000, 90000, 100000]
+  grid_m_s: [10, 25, 50, 75, 100, 125, 150, 175, 200, 250, 300, 400, 500, 750, 1000]
+  grid_directions: [0, 50]             # direction ids 0..49  ([first, stop), like Python's range)
+  robustness:
+    directions: [0, 20]
+    obs_seeds: [10000, 10005]
+    sizes_km: [15000, 30000]
+  thresholds:
+    directions: [1000, 1200]
+    probe_km: [500, 5000, 100000]      # first probes of the bisection search
+    bracket_km: 250                    # stop when the bracket is this narrow
+
+
+# -------------------------------------------------------------------------------------
+# Orekit
+# -------------------------------------------------------------------------------------
 orekit:
-  data_path: null                      # path to orekit-data (needed by orekit_bls),
-                                       # or leave null and set the OREKIT_DATA environment variable
+  data_path: null          # path to orekit-data (leap seconds etc., needed by Orekit BLS),
+                           # or leave null and set the OREKIT_DATA environment variable

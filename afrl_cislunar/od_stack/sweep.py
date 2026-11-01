@@ -35,11 +35,10 @@ import numpy as np
 from scipy.stats import chi2
 
 from .contracts import Observations
-from .estimation import ESTIMATORS, EstimationFailure
+from .estimation import EstimationFailure
 from .frames import EarthMoonSystem, radec_to_los
 from .iod import IOD_METHODS, IODFailure
-from .propagators import PROPAGATORS
-from .run import load_config
+from .config import build_estimator, build_propagator, load_config, method_options
 from .sources import _read_csv, dense_truth, load_synthetic_obs, load_synthetic_truth
 from .uncertainty import consistency
 
@@ -75,10 +74,8 @@ class Sweeper:
             warnings.simplefilter("ignore")
             self.template = load_synthetic_obs(cfg["data"]["observations"], self.sys)
         _, self.tru_rot, self.tru_tau = load_synthetic_truth(self.truth_path, self.sys)
-        ecfg = dict(cfg.get("estimation") or {"method": "none"})
-        self.estimator = ESTIMATORS[ecfg.pop("method")](self.sys, orekit_data=self.orekit_data, **ecfg)
-        pcfg = dict(cfg["propagator"])
-        self.prop = PROPAGATORS[pcfg.pop("method")](self.sys, orekit_data=self.orekit_data, **pcfg)
+        self.estimator = build_estimator(cfg, self.sys)
+        self.prop = build_propagator(cfg, self.sys)
         scfg = cfg.get("sweeps", {})
         self.ok_km = float(scfg.get("converged_if_error_below_km", 1000))
         self.ref_noise = float(scfg.get("threshold_reference_noise_arcsec", 10))
@@ -97,10 +94,13 @@ class Sweeper:
         """One case. obs_seed picks the noise realization (default 10_000 + seed).
         features(obs, x_iod, x0) -> dict, if given, adds columns to the row (x0 is None
         when BLS fails); see convergence_features.py."""
-        icfg = dict(self.cfg["iod"])
-        icfg.update(iod_overrides or {})
+        overrides = dict(iod_overrides or {})
+        method = overrides.pop("method", None) or self.cfg["iod"]["method"]
+        _, icfg = method_options({**self.cfg["iod"], "method": method}, IOD_METHODS)
+        icfg.update(overrides)
         icfg.setdefault("seed", seed)
-        method = icfg.pop("method")
+        for k in ("orekit_data", "truth_path"):
+            icfg.pop(k, None)
         row = {"noise_arcsec": noise_arcsec, "seed": seed, "iod_method": method,
                "iod_position_error_km_requested": icfg.get("position_error_km") if method == "truth_plus_error" else None}
         obs_seed = 10_000 + seed if obs_seed is None else int(obs_seed)

@@ -19,7 +19,8 @@ def cr3bp_eom(t, s, mu):
     return [vx, vy, vz, ax, ay, az]
 
 
-def propagate_cr3bp(x0: np.ndarray, tau0: float, taus: np.ndarray, mu: float) -> np.ndarray:
+def propagate_cr3bp(x0: np.ndarray, tau0: float, taus: np.ndarray, mu: float,
+                    rtol: float = TOL["rtol"], atol: float = TOL["atol"]) -> np.ndarray:
     """Propagate x0 (given at tau0) to every time in taus, forward and/or backward.
     Returns an array of shape (len(taus), 6)."""
     taus = np.asarray(taus, dtype=float)
@@ -30,7 +31,8 @@ def propagate_cr3bp(x0: np.ndarray, tau0: float, taus: np.ndarray, mu: float) ->
         if t_end == tau0:
             out[mask] = x0
             continue
-        sol = solve_ivp(cr3bp_eom, [tau0, t_end], x0, args=(mu,), dense_output=True, **TOL)
+        sol = solve_ivp(cr3bp_eom, [tau0, t_end], x0, args=(mu,), dense_output=True,
+                        **{**TOL, "rtol": rtol, "atol": atol})
         if not sol.success:
             raise RuntimeError(f"CR3BP propagation failed: {sol.message}")
         out[mask] = sol.sol(taus[mask]).T

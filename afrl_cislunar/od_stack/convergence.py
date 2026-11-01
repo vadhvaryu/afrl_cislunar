@@ -42,7 +42,7 @@ import yaml
 
 from . import parallel
 from .convergence_features import outcome_category
-from .run import load_config
+from .config import load_config
 
 OUT_DIR = "results/convergence"      # + /<estimator>, e.g. results/convergence/orekit_bls
 GATE_RMS = 3.0                        # a finished fit with residual RMS above this (in sigma) counts as failed
@@ -57,6 +57,38 @@ GRID_DIRS = range(0, 50)
 ROBUST_DIRS, ROBUST_SEEDS, ROBUST_KM = range(0, 20), range(10_000, 10_005), (15_000, 30_000)
 THRESH_DIRS = range(1_000, 1_200)
 THRESH_LO, THRESH_MID, THRESH_HI, THRESH_BRACKET = 500.0, 5_000.0, 100_000.0, 250.0
+
+
+
+def apply_config(cfg: dict) -> None:
+    """Replace the defaults above with config.yaml's `convergence:` block (any key left out
+    keeps its default). Called in the main process AND in every worker process, because
+    each worker re-imports this module and would otherwise see only the defaults."""
+    global OUT_DIR, GATE_RMS, NOISE_ARCSEC, OBS_SEED, VEL_PER_KM, GRID_KM, GRID_M_S, GRID_DIRS
+    global ROBUST_DIRS, ROBUST_SEEDS, ROBUST_KM, THRESH_DIRS, THRESH_LO, THRESH_MID, THRESH_HI, THRESH_BRACKET
+    c = cfg.get("convergence") or {}
+    rng = lambda pair: range(int(pair[0]), int(pair[1]))           # [first, stop) like Python's range
+    OUT_DIR = c.get("out_dir", OUT_DIR)
+    GATE_RMS = float(c.get("gate_rms_sigma", GATE_RMS))
+    NOISE_ARCSEC = float(c.get("noise_arcsec", NOISE_ARCSEC))
+    OBS_SEED = int(c.get("obs_seed", OBS_SEED))
+    VEL_PER_KM = float(c.get("velocity_m_s_per_km", VEL_PER_KM))
+    GRID_KM = [float(x) for x in c.get("grid_km", GRID_KM)]
+    GRID_M_S = [float(x) for x in c.get("grid_m_s", GRID_M_S)]
+    if "grid_directions" in c:
+        GRID_DIRS = rng(c["grid_directions"])
+    rb = c.get("robustness") or {}
+    if "directions" in rb:
+        ROBUST_DIRS = rng(rb["directions"])
+    if "obs_seeds" in rb:
+        ROBUST_SEEDS = rng(rb["obs_seeds"])
+    ROBUST_KM = tuple(float(x) for x in rb.get("sizes_km", ROBUST_KM))
+    th = c.get("thresholds") or {}
+    if "directions" in th:
+        THRESH_DIRS = rng(th["directions"])
+    THRESH_LO, THRESH_MID, THRESH_HI = (float(x) for x in th.get("probe_km", (THRESH_LO, THRESH_MID, THRESH_HI)))
+    THRESH_BRACKET = float(th.get("bracket_km", THRESH_BRACKET))
+
 
 GRID_KEY = ("mode", "size", "direction", "obs_seed")
 THRESH_KEY = ("mode", "direction", "obs_seed")
@@ -82,6 +114,7 @@ def errors_for(mode: str, size: float) -> tuple[float, float]:
 # ----------------------------------------------------------------------------- worker side
 
 def init_worker(cfg: dict) -> None:
+    apply_config(cfg)
     parallel.init_sweeper(cfg)
     from .convergence_features import FeatureCalculator
 
@@ -90,7 +123,8 @@ def init_worker(cfg: dict) -> None:
 
 
 def run_case(mode: str, size: float, k: int, obs_seed: int, sw=None, fc=None,
-             noise_arcsec: float = NOISE_ARCSEC) -> dict:
+             noise_arcsec: float | None = None) -> dict:
+    noise_arcsec = NOISE_ARCSEC if noise_arcsec is None else noise_arcsec
     sw = sw or parallel.WORKER["sweeper"]
     fc = fc or parallel.WORKER["features"]
     d_km, w = errors_for(mode, size)
@@ -223,6 +257,7 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     cfg = load_config(a.config)
+    apply_config(cfg)
     if a.estimation:
         cfg["estimation"] = {**(cfg.get("estimation") or {}), "method": a.estimation}
     a.out = a.out or os.path.join(OUT_DIR, cfg["estimation"]["method"])
@@ -233,7 +268,13 @@ def main(argv=None) -> int:
         yaml.safe_dump({**copy.deepcopy(cfg), "convergence": {
             "noise_arcsec": NOISE_ARCSEC, "obs_seed": OBS_SEED, "velocity_m_s_per_km": VEL_PER_KM,
             "gate_rms_sigma": GATE_RMS,
-            "grid_km": GRID_KM, "grid_m_s": GRID_M_S}}, f, sort_keys=False)
+            "grid_km": GRID_KM, "grid_m_s": GRID_M_S,
+            "grid_directions": [GRID_DIRS.start, GRID_DIRS.stop],
+            "robustness": {"directions": [ROBUST_DIRS.start, ROBUST_DIRS.stop],
+                           "obs_seeds": [ROBUST_SEEDS.start, ROBUST_SEEDS.stop], "sizes_km": list(ROBUST_KM)},
+            "thresholds": {"directions": [THRESH_DIRS.start, THRESH_DIRS.stop],
+                           "probe_km": [THRESH_LO, THRESH_MID, THRESH_HI], "bracket_km": THRESH_BRACKET}}},
+            f, sort_keys=False)
 
     if a.which == "pilot":
         g, t = pilot_jobs()
