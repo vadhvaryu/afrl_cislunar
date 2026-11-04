@@ -27,23 +27,43 @@ Requires: numpy, scipy, matplotlib
 # %% Imports
 import csv
 import os
+import sys
 import numpy as np
+import yaml
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 from cr3bp import nondim_cr3bp
 
-# %% 1. Settings (change these to make different test cases)
-MU = 0.0121505             # Earth-Moon mass ratio (same as the paper)
-DU = 384338.0              # distance unit [km]
-TU = 375099.0              # time unit [s]
+# %% 1. Settings
+# They come from config.yaml (the `system`, `generator` and `data` blocks), so the
+# generator and the OD stack can never disagree about mu, DU, TU or file names.
+# Run:  python obs_generator.py              (uses config.yaml)
+#       python obs_generator.py other.yaml   (uses another config file)
+# A value missing from the config falls back to the default written here.
+CONFIG_PATH = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].endswith((".yaml", ".yml")) else "config.yaml"
+CFG = {}
+if os.path.exists(CONFIG_PATH):
+    with open(CONFIG_PATH) as f:
+        CFG = yaml.safe_load(f) or {}
+SYSTEM, GEN, DATA = CFG.get("system") or {}, CFG.get("generator") or {}, CFG.get("data") or {}
+
+MU = float(SYSTEM.get("mu", 0.0121505))     # Earth-Moon mass ratio (same as the paper)
+DU = float(SYSTEM.get("du_km", 384338.0))   # distance unit [km]
+TU = float(SYSTEM.get("tu_s", 375099.0))    # time unit [s]
 
 # Truth starting state [x, y, z, vx, vy, vz], nondimensional rotating frame
-TRUTH_STATE = np.array([0.872763, 0.0, 0.190505, 0.0, 0.235988, 0.0])   # L1 northern halo
+TRUTH_STATE = np.array(GEN.get("truth_state", [0.872763, 0.0, 0.190505, 0.0, 0.235988, 0.0]), float)  # L1 northern halo
 
-N_OBS = 5                  # number of observations (IOD needs at least 3)
-SPAN_DAYS = 8.0            # time from first to last observation (halo period is ~9.6 days)
-NOISE_ARCSEC = 10.0        # 1-sigma telescope noise per angle (paper uses 10")
-SEED = 1                   # fixed random seed so results are repeatable
+N_OBS = int(GEN.get("n_obs", 5))                       # number of observations (IOD needs at least 3)
+SPAN_DAYS = float(GEN.get("span_days", 8.0))           # first to last observation (halo period is ~9.6 days)
+NOISE_ARCSEC = float(GEN.get("noise_arcsec", 10.0))    # 1-sigma telescope noise per angle (paper uses 10")
+SEED = int(GEN.get("seed", 1))                         # fixed random seed so results are repeatable
+RTOL = float(GEN.get("rtol", 1e-12))                   # integrator tolerances for the truth orbit
+ATOL = float(GEN.get("atol", 1e-12))
+OBS_PATH = DATA.get("observations", "data/synthetic_obs.csv")
+TRUTH_PATH = DATA.get("truth") or "data/synthetic_truth.csv"
+FIGURE_PATH = GEN.get("figure", "figures/synthetic_obs.png")
+SHOW_PLOT = bool(GEN.get("show_plot", True))           # False when running headless (e.g. in Docker)
 
 OBSERVER = np.array([-MU, 0.0, 0.0])   # Earth's center in the rotating frame
 
@@ -52,7 +72,7 @@ tau_end = SPAN_DAYS * 86400 / TU
 tau_fine = np.linspace(0, tau_end, 2000)                 # smooth curve for plots
 tau_obs = np.linspace(0, tau_end, N_OBS)                 # observation times
 
-tol = dict(method="DOP853", rtol=1e-12, atol=1e-12)
+tol = dict(method="DOP853", rtol=RTOL, atol=ATOL)
 sol = solve_ivp(nondim_cr3bp, [0, tau_end], TRUTH_STATE, args=(MU,),
                 dense_output=True, **tol)
 Y_fine = sol.sol(tau_fine).T                             # (2000, 6)
@@ -91,16 +111,17 @@ ra_meas = (ra_true + rng.normal(0, sigma_deg, N_OBS)) % 360.0
 dec_meas = dec_true + rng.normal(0, sigma_deg, N_OBS)
 
 # %% 5. Save the observations (IOD input) and the truth (for grading)
-os.makedirs("data", exist_ok=True)
+for p in (OBS_PATH, TRUTH_PATH):
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
 t_days = tau_obs * TU / 86400
 
-with open("data/synthetic_obs.csv", "w", newline="") as f:
+with open(OBS_PATH, "w", newline="") as f:
     w = csv.writer(f)
     w.writerow(["obs_id", "time_days", "ra_deg", "dec_deg", "sigma_arcsec"])
     for i in range(N_OBS):
         w.writerow([i, f"{t_days[i]:.6f}", f"{ra_meas[i]:.8f}", f"{dec_meas[i]:.8f}", NOISE_ARCSEC])
 
-with open("data/synthetic_truth.csv", "w", newline="") as f:
+with open(TRUTH_PATH, "w", newline="") as f:
     w = csv.writer(f)
     w.writerow(["obs_id", "time_days", "x", "y", "z", "vx", "vy", "vz",
                 "range_km", "ra_true_deg", "dec_true_deg"])
@@ -112,7 +133,7 @@ print(f"Truth orbit: L1 halo, {SPAN_DAYS} days, {N_OBS} observations, {NOISE_ARC
 print(f"{'obs':>3} {'day':>6} {'RA (deg)':>10} {'Dec (deg)':>10} {'range (km)':>12}")
 for i in range(N_OBS):
     print(f"{i:>3} {t_days[i]:6.2f} {ra_meas[i]:10.4f} {dec_meas[i]:10.4f} {range_km[i]:12,.0f}")
-print("Saved data/synthetic_obs.csv (IOD input) and data/synthetic_truth.csv (answer key)")
+print(f"Saved {OBS_PATH} (IOD input) and {TRUTH_PATH} (answer key)")
 
 # %% 6. Plots
 fig = plt.figure(figsize=(15, 4.8), dpi=100)
@@ -161,6 +182,7 @@ ax.grid(alpha=0.3)
 fig.suptitle("Synthetic angles-only observations of a cislunar object (observer at Earth's center)",
              fontsize=13)
 fig.tight_layout()
-os.makedirs("figures", exist_ok=True)
-fig.savefig("figures/synthetic_obs.png", bbox_inches="tight")
-plt.show()
+os.makedirs(os.path.dirname(FIGURE_PATH) or ".", exist_ok=True)
+fig.savefig(FIGURE_PATH, bbox_inches="tight")
+if SHOW_PLOT:
+    plt.show()

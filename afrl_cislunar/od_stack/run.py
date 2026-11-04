@@ -16,8 +16,8 @@ import os
 import sys as _sys
 
 import numpy as np
-import yaml
 
+from .config import build_estimator, build_iod, build_propagator, load_config  # noqa: F401 (load_config re-exported)
 from .estimation import ESTIMATORS, EstimationFailure
 from .frames import EarthMoonSystem
 from .iod import IOD_METHODS, IODFailure
@@ -28,32 +28,23 @@ from .sources import dense_truth, load_synthetic_obs, load_synthetic_truth
 DAY = 86400.0
 
 
-def load_config(path: str) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
-
-
 def run(cfg: dict, make_files: bool = True) -> dict:
+    # Settings for every stage come from config.yaml; od_stack/config.py builds each stage
+    # from its block (method name + shared settings + that method's own block).
     sys = EarthMoonSystem(**cfg.get("system", {}))
-    orekit_data = cfg.get("orekit", {}).get("data_path")
 
     # 1. Data source -> Observations
     obs = load_synthetic_obs(cfg["data"]["observations"], sys)
 
     # 2. IOD -> StateEstimate
-    icfg = dict(cfg["iod"])
-    iod = IOD_METHODS[icfg.pop("method")](sys, orekit_data=orekit_data,
-                                          truth_path=cfg["data"].get("truth"), **icfg)
-    x_iod = iod.estimate(obs)
+    x_iod = build_iod(cfg, sys).estimate(obs)
 
     # 3. Estimation (refine with all observations) -> StateEstimate + covariance
-    ecfg = dict(cfg.get("estimation") or {"method": "none"})
-    estimator = ESTIMATORS[ecfg.pop("method")](sys, orekit_data=orekit_data, **ecfg)
+    estimator = build_estimator(cfg, sys)
     x0 = estimator.refine(obs, x_iod)
 
     # 4. Propagator -> Trajectory (dense, over the whole observation span)
-    pcfg = dict(cfg["propagator"])
-    prop = PROPAGATORS[pcfg.pop("method")](sys, orekit_data=orekit_data, **pcfg)
+    prop = build_propagator(cfg, sys)
     n = int(cfg.get("output", {}).get("dense_points", 800))
     t_dense = np.linspace(obs.t.min(), obs.t.max(), n)
     est = prop.propagate(x0, t_dense)
