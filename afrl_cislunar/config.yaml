@@ -12,7 +12,7 @@ data:
   truth: data/synthetic_truth.csv      # answer key; remove for real data
 
 iod:
-  method: truth_plus_error             # truth_plus_error (test stand-in) | gooding | gauss | laplace
+  method: truth_plus_error             # truth_plus_error (test stand-in) | cr3bp_dc | range_grid | range_grid_fd | halo_catalog | perturbed_laplace | laplace_moon | gooding_moon | gooding | gauss | laplace
 
   # gooding / gauss / laplace (Orekit, two-body)
   obs_indices: [0, 2, 4]               # which 3 observations to use
