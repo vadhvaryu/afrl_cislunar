@@ -64,3 +64,39 @@ def dense_truth(truth_rot: np.ndarray, truth_taus: np.ndarray, t_s: np.ndarray, 
     x = propagate_cr3bp(truth_rot[0], truth_taus[0], taus, sys.mu)
     rv = [rotating_to_emi(tau, xi, sys) for tau, xi in zip(taus, x)]
     return Trajectory(t=np.asarray(t_s), r=np.array([a for a, _ in rv]), v=np.array([b for _, b in rv]), label="Truth")
+
+
+def resample_truth_obs(truth_path: str, noise_arcsec: float, seed: int) -> Observations:
+    """New noisy observations from the truth file's noise-free angles (observer at Earth's
+    center, like obs_generator.py v1). Lets experiments draw fresh noise without new files."""
+    rows = _read_csv(truth_path)
+    t = np.array([float(r["time_days"]) for r in rows]) * 86400.0
+    ra = np.radians([float(r["ra_true_deg"]) for r in rows])
+    dec = np.radians([float(r["dec_true_deg"]) for r in rows])
+    s = np.radians(float(noise_arcsec) / 3600.0)
+    rng = np.random.default_rng(int(seed))
+    ra, dec = ra + rng.normal(0.0, s, len(t)), dec + rng.normal(0.0, s, len(t))
+    return Observations(t=t, los=radec_to_los(ra, dec), observer=np.zeros((len(t), 3)),
+                        sigma=np.full(len(t), s), ra=ra, dec=dec)
+
+
+def load_observations(cfg: dict, sys: EarthMoonSystem) -> Observations:
+    """Stages 1-2 of the chain: raw data -> the observation list every later stage uses."""
+    d, m = cfg["data"], cfg["measurements"]
+    if d["source"] == "csv":
+        obs = load_synthetic_obs(d["observations"], sys)
+    else:
+        obs = resample_truth_obs(d["truth"], d["noise_arcsec"], d["noise_seed"])
+
+    if d["observer"] == "geocenter":
+        obs.observer = np.zeros_like(obs.observer)
+    if m["sigma_arcsec"] != "from_file":
+        obs.sigma = np.full(len(obs), np.radians(float(m["sigma_arcsec"]) / 3600.0))
+
+    if d["use_obs"] != "all":
+        idx = list(d["use_obs"])
+        if max(idx) >= len(obs) or min(idx) < 0:
+            raise ValueError(f"data.use_obs {idx} refers to observations that don't exist (there are {len(obs)})")
+        obs = Observations(t=obs.t[idx], los=obs.los[idx], observer=obs.observer[idx],
+                           sigma=obs.sigma[idx], ra=obs.ra[idx], dec=obs.dec[idx])
+    return obs

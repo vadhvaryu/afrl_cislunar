@@ -11,6 +11,7 @@ import pytest
 from od_stack.contracts import Observations
 from od_stack.dynamics import propagate_cr3bp
 from od_stack.frames import EarthMoonSystem, emi_to_rotating, rotating_to_emi
+from od_stack.config import ConfigError, prepare, set_value
 from od_stack.run import load_config, run
 from od_stack.sources import load_synthetic_truth
 
@@ -53,10 +54,12 @@ def test_frame_matches_generator_angles():
     assert np.allclose(np.linalg.norm(truth.r, axis=1) / 1e3, [float(r["range_km"]) for r in rows], atol=1e-2)
 
 
-def _cfg(**iod):
+def _cfg(**stand_in):
+    """Default config, but with the test stand-in IOD, no BLS and the scipy propagator (fast)."""
     cfg = load_config("config.yaml")
-    cfg["iod"].update(method="truth_plus_error", **iod)
-    cfg["estimation"] = {"method": "none"}
+    cfg["iod"]["method"] = "truth_plus_error"
+    cfg["iod"]["truth_plus_error"].update(stand_in)
+    cfg["estimation"]["method"] = "none"
     cfg["propagator"]["method"] = "cr3bp"
     return cfg
 
@@ -120,8 +123,65 @@ def test_batch_least_squares_recovers_orbit():
     and the true error lies inside 3 sigma of the covariance it reports."""
     pytest.importorskip("orekit_jpype")
     cfg = _cfg(position_error_km=1000, velocity_error_m_s=10)
-    cfg["estimation"] = {"method": "orekit_bls"}
+    cfg["estimation"]["method"] = "orekit_bls"
     s = run(cfg, make_files=False)
     assert s["position_error_km"] < 100
     assert s["position_error_km"] < 3 * s["sigma_position_km"]
     assert s["info"]["rms_normalized_residual"] < 3
+
+
+# ---------- config ----------
+
+def test_config_fills_defaults_and_catches_typos():
+    full = prepare({"iod": {"method": "truth_plus_error"}})          # nearly empty config still works
+    assert full["propagator"]["method"] == "orekit_cr3bp" and full["orbit"]["type"] == "cartesian"
+    with pytest.raises(ConfigError) as e:
+        prepare({"iod": {"method": "rangesearch"}, "orbit": {"type": "polar"}, "datta": {}})
+    msg = str(e.value)
+    assert "rangesearch" in msg and "polar" in msg and "datta" in msg     # all problems reported at once
+
+
+def test_set_override():
+    cfg = {}
+    set_value(cfg, "data.noise_arcsec=100")
+    set_value(cfg, "data.use_obs=[0, 1, 2]")
+    assert cfg["data"]["noise_arcsec"] == 100 and cfg["data"]["use_obs"] == [0, 1, 2]
+
+
+def test_resampled_noise_and_subset():
+    cfg = _cfg(position_error_km=0, velocity_error_m_s=0)
+    cfg["data"].update(source="resample_truth", noise_arcsec=50, noise_seed=3, use_obs=[0, 1, 2, 3])
+    s = run(cfg, make_files=False)
+    assert s["n_observations"] == 4 and s["max_position_error_km"] < 1e-3
+
+
+def test_prediction_window():
+    cfg = _cfg(position_error_km=0, velocity_error_m_s=0)
+    cfg["prediction"].update(start_days=1, end_days=12, points=50)
+    s = run(cfg, make_files=False)
+    assert s["prediction_days"] == [1.0, 12.0]
+
+
+@pytest.mark.skipif(not _orekit_data_available(), reason="set orekit.data_path or OREKIT_DATA to run")
+def test_full_pipeline_range_search_no_answer_key():
+    """Range-search IOD (coarse grid, for speed) -> BLS on David's file, without the answer key."""
+    pytest.importorskip("orekit_jpype")
+    cfg = load_config("config.yaml")
+    cfg["iod"]["method"] = "range_search"
+    cfg["iod"]["range_search"] = {"range_km": [200000, 500000, 20000], "range_rate_m_s": [-600, 600, 100]}
+    s = run(cfg, make_files=False)
+    assert s["iod_position_error_km"] > 1000            # IOD alone is rough...
+    assert s["position_error_km"] < 3 * s["sigma_position_km"] < 300   # ...BLS lands within its own 3 sigma
+
+
+@pytest.mark.skipif(not _orekit_data_available(), reason="set orekit.data_path or OREKIT_DATA to run")
+@pytest.mark.parametrize("orbit_type,optimizer", [("equinoctial", "levenberg_marquardt"), ("cartesian", "gauss_newton")])
+def test_orbit_type_and_optimizer_give_same_answer(orbit_type, optimizer):
+    pytest.importorskip("orekit_jpype")
+    base = _cfg(position_error_km=1000, velocity_error_m_s=10)
+    base["estimation"]["method"] = "orekit_bls"
+    alt = copy.deepcopy(base)
+    alt["orbit"]["type"], alt["estimation"]["optimizer"] = orbit_type, optimizer
+    a, b = run(base, make_files=False), run(alt, make_files=False)
+    assert abs(a["position_error_km"] - b["position_error_km"]) < 0.1
+    assert abs(a["sigma_position_km"] - b["sigma_position_km"]) < 0.1   # covariance converted back to x, y, z

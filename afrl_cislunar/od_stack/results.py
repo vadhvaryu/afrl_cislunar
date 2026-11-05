@@ -49,10 +49,14 @@ def summarize(x_iod: StateEstimate, x0: StateEstimate, truth_at_x0: Trajectory, 
     return s
 
 
-def write_outputs(out_dir: str, summary: dict, est: Trajectory, truth: Trajectory) -> None:
+def write_outputs(out_dir: str, summary: dict, est: Trajectory, truth: Trajectory,
+                  write_summary: bool = True, write_csv: bool = True) -> None:
     os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, "summary.json"), "w") as f:
-        json.dump(summary, f, indent=2)
+    if write_summary:
+        with open(os.path.join(out_dir, "summary.json"), "w") as f:
+            json.dump(summary, f, indent=2)
+    if not write_csv:
+        return
     err = position_error_km(est, truth)
     with open(os.path.join(out_dir, "trajectory_comparison.csv"), "w", newline="") as f:
         w = csv.writer(f)

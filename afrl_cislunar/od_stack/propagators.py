@@ -78,8 +78,9 @@ class OrekitCR3BPPropagator:
 
     name = "orekit_cr3bp"
 
-    def __init__(self, sys: EarthMoonSystem, orekit_data: str | None = None, **_):
+    def __init__(self, sys: EarthMoonSystem, orekit_data: str | None = None, builder: dict | None = None, **_):
         self.sys = sys
+        self.builder_settings = builder or {}
         start_orekit(orekit_data)
 
     def propagate(self, x0: StateEstimate, t: np.ndarray) -> Trajectory:
@@ -92,7 +93,7 @@ class OrekitCR3BPPropagator:
         for mask, t_end in ((t >= x0.t, t.max()), (t < x0.t, t.min())):
             if not mask.any():
                 continue
-            builder = propagator_builder(self.sys, x0.t, x0.r, x0.v)
+            builder = propagator_builder(self.sys, x0.t, x0.r, x0.v, self.builder_settings)
             prop = builder.buildPropagator(builder.getSelectedNormalizedParameters())
             gen = prop.getEphemerisGenerator()
             prop.propagate(t0.shiftedBy(float(x0.t)), t0.shiftedBy(float(t_end)))
