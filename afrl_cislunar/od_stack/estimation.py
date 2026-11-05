@@ -43,10 +43,38 @@ class OrekitBatchLS:
     name = "orekit_bls"
 
     def __init__(self, sys: EarthMoonSystem, orekit_data: str | None = None, max_iterations: int = 50,
-                 max_evaluations: int = 100, convergence_threshold: float = 1e-3, **_):
+                 max_evaluations: int = 100, convergence_threshold: float = 1e-3,
+                 optimizer: str = "levenberg_marquardt", covariance: bool = True,
+                 builder: dict | None = None, orbit_type: str = "cartesian", station_offset_m: float = 1.0, **_):
         self.sys = sys
         self.max_iter, self.max_eval, self.threshold = int(max_iterations), int(max_evaluations), float(convergence_threshold)
+        self.optimizer, self.want_cov = optimizer, bool(covariance)
+        self.builder_settings, self.orbit_type, self.station_offset_m = builder or {}, orbit_type, float(station_offset_m)
         start_orekit(orekit_data)
+
+    def _optimizer(self):
+        if self.optimizer == "gauss_newton":
+            from org.hipparchus.linear import QRDecomposer
+            from org.hipparchus.optim.nonlinear.vector.leastsquares import GaussNewtonOptimizer
+
+            return GaussNewtonOptimizer(QRDecomposer(1e-11), False)
+        from org.hipparchus.optim.nonlinear.vector.leastsquares import LevenbergMarquardtOptimizer
+
+        return LevenbergMarquardtOptimizer()
+
+    def _cartesian_covariance(self, estimator, fitted_orbit):
+        """6x6 covariance in x, y, z, vx, vy, vz (SI), whatever orbit type was estimated."""
+        C = estimator.getPhysicalCovariances(1e-12)
+        if self.orbit_type == "cartesian":
+            return np.array([[C.getEntry(i, j) for j in range(6)] for i in range(6)])
+        from org.orekit.orbits import OrbitType, PositionAngleType
+        from org.orekit.propagation import StateCovariance
+
+        sub = C.getSubMatrix(0, 5, 0, 5)
+        sc = StateCovariance(sub, fitted_orbit.getDate(), fitted_orbit.getFrame(),
+                             OrbitType.valueOf(self.orbit_type.upper()), PositionAngleType.TRUE)
+        M = sc.changeCovarianceType(fitted_orbit, OrbitType.CARTESIAN, PositionAngleType.TRUE).getMatrix()
+        return np.array([[M.getEntry(i, j) for j in range(6)] for i in range(6)])
 
     def _measurements(self, obs: Observations):
         from jpype import JArray, JDouble
@@ -58,7 +86,7 @@ class OrekitBatchLS:
             raise NotImplementedError("Only an observer at Earth's center is supported so far; "
                                       "ground stations need a GroundStation per observer position.")
         frame, t0 = frame_and_epoch()
-        station, sat = geocenter_station(), ObservableSatellite(0)
+        station, sat = geocenter_station(self.station_offset_m), ObservableSatellite(0)
         out = []
         for t, ra, dec, s in zip(obs.t, obs.ra, obs.dec, obs.sigma):
             ra = math.atan2(math.sin(ra), math.cos(ra))     # same branch Orekit uses
@@ -67,13 +95,13 @@ class OrekitBatchLS:
         return out
 
     def refine(self, obs: Observations, x0: StateEstimate) -> StateEstimate:
-        from org.hipparchus.optim.nonlinear.vector.leastsquares import LevenbergMarquardtOptimizer
         from org.orekit.estimation.leastsquares import BatchLSEstimator
 
         from .orekit_models import frame_and_epoch, propagator_builder
 
         frame, _ = frame_and_epoch()
-        estimator = BatchLSEstimator(LevenbergMarquardtOptimizer(), propagator_builder(self.sys, x0.t, x0.r, x0.v))
+        builder = propagator_builder(self.sys, x0.t, x0.r, x0.v, self.builder_settings, self.orbit_type)
+        estimator = BatchLSEstimator(self._optimizer(), builder)
         estimator.setParametersConvergenceThreshold(self.threshold)
         estimator.setMaxIterations(self.max_iter)
         estimator.setMaxEvaluations(self.max_eval)
@@ -91,18 +119,20 @@ class OrekitBatchLS:
 
         pv = fitted.getInitialState().getPVCoordinates(frame)
         p, v = pv.getPosition(), pv.getVelocity()
-        try:
-            C = estimator.getPhysicalCovariances(1e-12)
-            cov = np.array([[C.getEntry(i, j) for j in range(6)] for i in range(6)])
-        except Exception:
-            cov = None        # happens at very high noise; worth investigating
+        cov = None
+        if self.want_cov:
+            try:
+                cov = self._cartesian_covariance(estimator, fitted.getInitialState().getOrbit())
+            except Exception:
+                cov = None    # happens at very high noise; worth investigating
         return StateEstimate(
             t=x0.t,
             r=np.array([p.getX(), p.getY(), p.getZ()]),
             v=np.array([v.getX(), v.getY(), v.getZ()]),
             cov=cov,
             method=f"{x0.method} + {self.name}",
-            info={**x0.info, "iterations": int(estimator.getIterationsCount()),
+            info={**x0.info, "optimizer": self.optimizer, "orbit_type": self.orbit_type,
+                  "iterations": int(estimator.getIterationsCount()),
                   "evaluations": int(estimator.getEvaluationsCount()),
                   "rms_normalized_residual": float(estimator.getOptimum().getRMS())},
         )

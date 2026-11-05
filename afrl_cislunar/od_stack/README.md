@@ -18,21 +18,44 @@ Put `od_stack/`, `tests/`, `config.yaml` and `requirements.txt` in the same fold
 ```
 pip install -r requirements.txt       # orekit-jpype also needs Java (JDK 11+)
 export OREKIT_DATA=~/halo-docker/orekit-data   # or set orekit.data_path in config.yaml
-python -m pytest -q                   # 8 tests, all should pass
+python -m pytest -q                   # 15 tests, all should pass
 python -m od_stack.run                # writes results/results.png, summary.json, trajectory_comparison.csv
 ```
 
 On Windows PowerShell use `$env:OREKIT_DATA="C:\path\to\orekit-data"` instead of `export`.
 `orekit-data` is needed by the BLS stage (leap seconds for the observer station).
 
-Swap modules from the command line or in `config.yaml`:
+## The config file: one place for every stage
+
+`config.yaml` follows the simulation chain in order. Each section is one stage, with a
+`method` (or type) choice and the decisions that go with it. Anything you delete falls back
+to a default, and typos are reported (all at once, with the valid options) before anything runs.
+
+| # | Section | Stage in the chain | Main decisions |
+|---|---|---|---|
+| 1 | `data` | raw data | file vs. fresh noise (`source`), noise level and seed, observer, which observations to use (`use_obs`) |
+| 2 | `measurements` | ObservedMeasurement list | measurement type, weighting (`sigma_arcsec`), geocenter station offset |
+| 3 | `iod` | IOD (subset) | `method` (range_search, truth_plus_error, gooding, gauss, laplace), epoch, each method's own settings block |
+| 4 | `orbit` | Orbit | `type`: cartesian, equinoctial, keplerian (also sets what BLS adjusts) |
+| 5 | `propagator_builder` | PropagatorBuilder | force model, integrator, step sizes, tolerance |
+| 6 | `estimation` | BatchLSEstimator | `method` (orekit_bls, none), optimizer, iteration limits, covariance on/off |
+| 7 | `propagator` | Propagator | `method` (orekit_cr3bp, cr3bp, keplerian) |
+| 8 | `prediction` | Orbit(t) | start and end time (can extend past the data), number of points |
+| 9 | `results` | Results/Graph | output folder; plot, CSV, summary, and a copy of the exact config used |
+
+Three ways to change a run:
 
 ```
-python -m od_stack.run --estimation none      # skip BLS, propagate the IOD state directly
-python -m od_stack.run --propagator cr3bp     # scipy CR3BP instead of Orekit
-python -m od_stack.run --iod gooding
-python -m od_stack.run --compare-iod          # every IOD method in one table
+python -m od_stack.run --config my_scenario.yaml          # a whole scenario in its own file
+python -m od_stack.run --set data.noise_arcsec=100 \
+                       --set iod.method=truth_plus_error  # change any setting for one run
+python -m od_stack.run --iod gooding                      # shortcuts for the 3 method choices
+python -m od_stack.run --show-config                      # print every setting, including defaults
+python -m od_stack.run --compare-iod                      # every IOD method in one table
 ```
+
+Every run with `results.save_config: true` writes `config_used.yaml` next to its results, so any
+result can be reproduced exactly.
 
 ## Conventions (every module uses these)
 
@@ -50,7 +73,8 @@ Data contracts: `od_stack/contracts.py`.
 | Stage | Name in config | What it is |
 |---|---|---|
 | Data source | (`data.observations`) | Reads `synthetic_obs.csv`. Uses observer columns `obs_x_km, obs_y_km, obs_z_km` (EMI) if present, otherwise assumes Earth's center. |
-| IOD | `truth_plus_error` | **Test stand-in.** True state plus a known error. Reads the answer key, so never use it for real results. Replace with David and Mack's IOD when it works. |
+| IOD | `range_search` | **Default.** CR3BP grid search over range and range-rate at the epoch; keeps the candidate that best fits all observations. Rough on its own (~29,000 km on David's data) but close enough for BLS. ~20 s. |
+| IOD | `truth_plus_error` | **Test stand-in.** True state plus a known error. Reads the answer key, so never use it for real results. Useful for controlled experiments. |
 | IOD | `gooding`, `gauss`, `laplace` | Orekit's angles-only methods (two-body). Fail on this data; see findings. |
 | Estimation | `orekit_bls` | Orekit `BatchLSEstimator` (Levenberg–Marquardt) on all RA/Dec observations. Estimates the 6 Cartesian state components at the IOD epoch; returns covariance, iterations, RMS. |
 | Estimation | `none` | Pass the IOD state straight through. |
@@ -71,7 +95,7 @@ Data contracts: `od_stack/contracts.py`.
 
 ## Adding a module
 
-- **IOD:** class with `name` and `estimate(obs) -> StateEstimate`; add to `IOD_METHODS` in `iod.py`.
+- **IOD:** class with `name`, `config_block` (its settings section under `iod:`) and `estimate(obs) -> StateEstimate`; add to `IOD_METHODS` in `iod.py`.
 - **Estimator:** class with `name` and `refine(obs, x0) -> StateEstimate`; add to `ESTIMATORS` in `estimation.py`.
 - **Propagator:** class with `name` and `propagate(x0, t) -> Trajectory`; add to `PROPAGATORS` in `propagators.py`.
 - **Data source:** a function that returns `Observations`.
@@ -103,6 +127,15 @@ Preliminary sweeps (quick, few seeds; redo properly):
 
 So the IOD needs to land within roughly 10,000 km for BLS to be reliable, and the covariance
 is trustworthy up to at least 100″ of noise.
+
+**Full pipeline without the answer key** (default config, David's file): range search lands
+29,000 km / 270 m/s off; BLS brings it to 15.1 km / 0.07 m/s (1-sigma 26 km), the same answer the
+stand-in reaches. With fresh noise draws (10 trials, 10″) it converged 10/10, median 24 km.
+
+**Config option checks** (stand-in start, David's file): Cartesian, equinoctial and Keplerian orbits,
+Levenberg–Marquardt and Gauss–Newton, and both integrators all reach the same 15.1 km answer
+(6–10 iterations). Predicting to day 12 grows the error to ~174 km; dropping the last observation
+raises it to ~141 km.
 
 ## Open questions for the team
 

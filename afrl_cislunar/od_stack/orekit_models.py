@@ -66,35 +66,53 @@ def cr3bp_force_models(sys: EarthMoonSystem) -> list:
     return [ThirdBodyAttraction(moon, "Moon", sys.gm_moon)]
 
 
-def propagator_builder(sys: EarthMoonSystem, t: float, r, v, max_step_s: float = 3600.0,
-                       position_tolerance_m: float = 0.01):
-    """NumericalPropagatorBuilder starting from a Cartesian state (Cartesian, because
-    Keplerian elements mean little in cislunar space)."""
+BUILDER_DEFAULTS = {"force_model": "cr3bp", "integrator": "dormand_prince_853", "min_step_s": 0.001,
+                    "max_step_s": 3600.0, "position_tolerance_m": 0.01, "position_scale_m": 1.0}
+
+
+def propagator_builder(sys: EarthMoonSystem, t: float, r, v, settings: dict | None = None,
+                       orbit_type: str = "cartesian"):
+    """Stages 4-5 of the chain: build the Orekit Orbit from a state, then the
+    NumericalPropagatorBuilder (force model + integrator) around it.
+
+    orbit_type also decides which 6 numbers Batch Least Squares adjusts. Cartesian is the
+    default because orbital elements around Earth mean little in cislunar space."""
     from org.hipparchus.geometry.euclidean.threed import Vector3D
-    from org.orekit.orbits import CartesianOrbit, PositionAngleType
-    from org.orekit.propagation.conversion import DormandPrince853IntegratorBuilder, NumericalPropagatorBuilder
+    from org.orekit.orbits import CartesianOrbit, OrbitType, PositionAngleType
+    from org.orekit.propagation.conversion import (DormandPrince54IntegratorBuilder,
+                                                   DormandPrince853IntegratorBuilder, NumericalPropagatorBuilder)
     from org.orekit.utils import PVCoordinates
 
+    s = {**BUILDER_DEFAULTS, **(settings or {})}
     frame, t0 = frame_and_epoch()
     orbit = CartesianOrbit(PVCoordinates(Vector3D(*map(float, r)), Vector3D(*map(float, v))),
                            frame, t0.shiftedBy(float(t)), sys.gm_earth)
-    builder = NumericalPropagatorBuilder(
-        orbit, DormandPrince853IntegratorBuilder(1e-3, max_step_s, position_tolerance_m),
-        PositionAngleType.TRUE, 1.0)
-    for force in cr3bp_force_models(sys):
-        builder.addForceModel(force)
+    if orbit_type != "cartesian":
+        orbit = OrbitType.valueOf(orbit_type.upper()).convertType(orbit)
+
+    integrators = {"dormand_prince_853": DormandPrince853IntegratorBuilder,
+                   "dormand_prince_54": DormandPrince54IntegratorBuilder}
+    integrator = integrators[s["integrator"]](float(s["min_step_s"]), float(s["max_step_s"]),
+                                              float(s["position_tolerance_m"]))
+    builder = NumericalPropagatorBuilder(orbit, integrator, PositionAngleType.TRUE, float(s["position_scale_m"]))
+    if s["force_model"] == "cr3bp":
+        for force in cr3bp_force_models(sys):
+            builder.addForceModel(force)
+    else:
+        raise ValueError(f"unknown force model {s['force_model']}")
     return builder
 
 
-def geocenter_station():
+def geocenter_station(offset_m: float = 1.0):
     """An Orekit GroundStation at (almost) Earth's center, matching obs_generator.py v1.
 
     Placed 1 m from the center: exactly at the center, Orekit's station geometry is
     undefined and returns NaN. 1 m shifts the line of sight by ~0.0006 arcsec,
     far below the 10 arcsec noise. Needs orekit-data (leap seconds) to be loaded.
     """
-    if "station" in _cache:
-        return _cache["station"]
+    key = ("station", float(offset_m))
+    if key in _cache:
+        return _cache[key]
     from org.orekit.bodies import GeodeticPoint, OneAxisEllipsoid
     from org.orekit.estimation.measurements import GroundStation
     from org.orekit.frames import TopocentricFrame
@@ -102,7 +120,7 @@ def geocenter_station():
     frame, _ = frame_and_epoch()
     radius = 6378137.0
     # A non-rotating sphere: no Earth-rotation effects can enter.
-    topo = TopocentricFrame(OneAxisEllipsoid(radius, 0.0, frame), GeodeticPoint(0.0, 0.0, -radius + 1.0), "geocenter")
+    topo = TopocentricFrame(OneAxisEllipsoid(radius, 0.0, frame), GeodeticPoint(0.0, 0.0, -radius + float(offset_m)), "geocenter")
     try:
         try:
             station = GroundStation(topo)
@@ -115,7 +133,7 @@ def geocenter_station():
             raise RuntimeError("Orekit needs orekit-data for this stage: set orekit.data_path in "
                                "config.yaml or the OREKIT_DATA environment variable") from None
         raise
-    _cache["station"] = station
+    _cache[key] = station
     return station
 
 
