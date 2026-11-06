@@ -42,7 +42,31 @@ from .frames import EarthMoonSystem
 from .orbit_catalog import correct_periodic, stability_index
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CACHE_PATH = os.path.join(ROOT, "results", "halo_catalog", "L1N.npz")
+
+
+def _writable(path: str) -> bool:
+    """True if path exists and is writable, or could be created inside a writable parent."""
+    while not os.path.exists(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            return False
+        path = parent
+    return os.access(path, os.W_OK)
+
+
+def default_cache_path() -> str:
+    """results/halo_catalog/L1N.npz next to the code. When that cannot be written (the read-only
+    cislunar-od container image), under the current directory instead, i.e. the case folder.
+    The CISLUNAR_CACHE_DIR environment variable overrides both."""
+    base = os.environ.get("CISLUNAR_CACHE_DIR")
+    if not base:
+        base = os.path.join(ROOT, "results")
+        if not _writable(base):
+            base = os.path.join(os.getcwd(), "results")
+    return os.path.join(base, "halo_catalog", "L1N.npz")
+
+
+CACHE_PATH = default_cache_path()
 
 # cislunar-custody L1_halo_north[14] (MIT); NOT the truth orbit.
 SEED_SMALL_HALO = (0.82476762, 0.0, 0.06773, 0.0, 0.17970, 0.0)
