@@ -577,11 +577,20 @@ def _md_rate_table(b, unit):
     return "\n".join(lines)
 
 
+def study_obs_seed(out_dir: str) -> int:
+    """Noise seed of the main grid, from the folder's config_used.yaml (default OBS_SEED)."""
+    try:
+        with open(os.path.join(out_dir, "config_used.yaml")) as f:
+            return int(yaml.safe_load(f)["convergence"]["obs_seed"])
+    except (OSError, KeyError, TypeError, ValueError):
+        return OBS_SEED
+
+
 def analyze(out_dir: str = OUT_DIR) -> dict:
     all_grid = load(os.path.join(out_dir, "grid.csv"))
     thr = load(os.path.join(out_dir, "thresholds.csv"))
     thr_runs = load(os.path.join(out_dir, "thresholds_runs.csv"))
-    grid = [r for r in all_grid if r["obs_seed"] == OBS_SEED]
+    grid = [r for r in all_grid if r["obs_seed"] == study_obs_seed(out_dir)]
     from .convergence_features import FeatureCalculator
     from .frames import EarthMoonSystem
 
@@ -735,7 +744,7 @@ def compare(dirs: list[str], path: str) -> dict:
     position-only), and how many of the first estimator's failures each later one rescues."""
     grids = {}
     for d in dirs:
-        g = [r for r in load(os.path.join(d, "grid.csv")) if r["obs_seed"] == OBS_SEED]
+        g = [r for r in load(os.path.join(d, "grid.csv")) if r["obs_seed"] == study_obs_seed(d)]
         grids[estimator_label(d)] = g
     names = list(grids)
     key = lambda r: (r["mode"], r["size"], r["direction"])

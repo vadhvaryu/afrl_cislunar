@@ -39,6 +39,23 @@ class NoEstimation:
         return x0
 
 
+def _levenberg_marquardt():
+    from org.hipparchus.optim.nonlinear.vector.leastsquares import LevenbergMarquardtOptimizer
+
+    return LevenbergMarquardtOptimizer()
+
+
+def _gauss_newton():
+    from org.hipparchus.linear import QRDecomposer
+    from org.hipparchus.optim.nonlinear.vector.leastsquares import GaussNewtonOptimizer
+
+    return GaussNewtonOptimizer(QRDecomposer(1e-11), False)
+
+
+# The least-squares solver inside Orekit's BatchLSEstimator (config.yaml: estimation.optimizer).
+OPTIMIZERS = {"levenberg_marquardt": _levenberg_marquardt, "gauss_newton": _gauss_newton}
+
+
 class OrekitBatchLS:
     """Orekit BatchLSEstimator (Levenberg-Marquardt) on RA/Dec angles, with the
     CR3BP-equivalent force model from orekit_models.py. Estimates the 6 Cartesian
@@ -53,8 +70,13 @@ class OrekitBatchLS:
 
     def __init__(self, sys: EarthMoonSystem, orekit_data: str | None = None, max_iterations: int = 50,
                  max_evaluations: int = 100, convergence_threshold: float = 1e-3, position_scale_m: float = 1.0,
-                 gate_rms: float | None = None, **_):
+                 gate_rms: float | None = None, optimizer: str = "levenberg_marquardt",
+                 builder_options: dict | None = None, **_):
+        if optimizer not in OPTIMIZERS:
+            raise ValueError(f"{self.name}: unknown optimizer {optimizer!r}; choose one of: {', '.join(OPTIMIZERS)}")
         self.sys = sys
+        self.optimizer = optimizer
+        self.builder_options = dict(builder_options or {})
         self.max_iter, self.max_eval, self.threshold = int(max_iterations), int(max_evaluations), float(convergence_threshold)
         self.position_scale = float(position_scale_m)
         self.gate_rms = None if gate_rms is None else float(gate_rms)
@@ -79,14 +101,14 @@ class OrekitBatchLS:
         return out
 
     def refine(self, obs: Observations, x0: StateEstimate) -> StateEstimate:
-        from org.hipparchus.optim.nonlinear.vector.leastsquares import LevenbergMarquardtOptimizer
         from org.orekit.estimation.leastsquares import BatchLSEstimator
 
         from .orekit_models import frame_and_epoch, propagator_builder
 
         frame, _ = frame_and_epoch()
-        estimator = BatchLSEstimator(LevenbergMarquardtOptimizer(),
-                                     propagator_builder(self.sys, x0.t, x0.r, x0.v, position_scale_m=self.position_scale))
+        builder = propagator_builder(self.sys, x0.t, x0.r, x0.v,
+                                     **{**self.builder_options, "position_scale_m": self.position_scale})
+        estimator = BatchLSEstimator(OPTIMIZERS[self.optimizer](), builder)
         estimator.setParametersConvergenceThreshold(self.threshold)
         estimator.setMaxIterations(self.max_iter)
         estimator.setMaxEvaluations(self.max_eval)

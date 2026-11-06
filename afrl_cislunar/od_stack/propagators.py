@@ -29,14 +29,15 @@ class CR3BPPropagator:
 
     name = "cr3bp"
 
-    def __init__(self, sys: EarthMoonSystem, **_):
+    def __init__(self, sys: EarthMoonSystem, rtol: float = 1e-12, atol: float = 1e-12, **_):
         self.sys = sys
+        self.rtol, self.atol = float(rtol), float(atol)
 
     def propagate(self, x0: StateEstimate, t: np.ndarray) -> Trajectory:
         tau0 = float(self.sys.tau(x0.t))
         x_rot0 = emi_to_rotating(tau0, x0.r, x0.v, self.sys)
         taus = self.sys.tau(t)
-        x_rot = propagate_cr3bp(x_rot0, tau0, taus, self.sys.mu)
+        x_rot = propagate_cr3bp(x_rot0, tau0, taus, self.sys.mu, rtol=self.rtol, atol=self.atol)
         rv = [rotating_to_emi(tau, x, self.sys) for tau, x in zip(taus, x_rot)]
         return Trajectory(t=np.asarray(t, float), r=np.array([a for a, _ in rv]),
                           v=np.array([b for _, b in rv]), label=f"{x0.method} + cr3bp")
@@ -78,8 +79,9 @@ class OrekitCR3BPPropagator:
 
     name = "orekit_cr3bp"
 
-    def __init__(self, sys: EarthMoonSystem, orekit_data: str | None = None, **_):
+    def __init__(self, sys: EarthMoonSystem, orekit_data: str | None = None, builder_options: dict | None = None, **_):
         self.sys = sys
+        self.builder_options = dict(builder_options or {})   # config.yaml: propagator_builder
         start_orekit(orekit_data)
 
     def propagate(self, x0: StateEstimate, t: np.ndarray) -> Trajectory:
@@ -92,7 +94,7 @@ class OrekitCR3BPPropagator:
         for mask, t_end in ((t >= x0.t, t.max()), (t < x0.t, t.min())):
             if not mask.any():
                 continue
-            builder = propagator_builder(self.sys, x0.t, x0.r, x0.v)
+            builder = propagator_builder(self.sys, x0.t, x0.r, x0.v, **self.builder_options)
             prop = builder.buildPropagator(builder.getSelectedNormalizedParameters())
             gen = prop.getEphemerisGenerator()
             prop.propagate(t0.shiftedBy(float(x0.t)), t0.shiftedBy(float(t_end)))
