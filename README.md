@@ -59,7 +59,7 @@ The current dynamics model uses the Earth-Moon CR3BP. This provides a simplified
 
 ### Higher-Fidelity Expansion
 
-The current software is structured so that the simplified CR3BP model can later be expanded with more detailed force models, real ephemerides, and higher-fidelity orbit determination.
+The current software is structured so that the simplified CR3BP model can later be expanded with more detailed force models, real ephemerides, and higher-fidelity dynamics.
 
 ## Stack Architecture
 
@@ -310,7 +310,7 @@ This allows simulation stages to be changed without modifying the main pipeline 
 
 Containerization is currently in progress.
 
-The `docker/orekit-cr3bp/` directory contains an initial Docker setup for running Orekit CR3BP tutorials with Java, Orekit dependencies, and `orekit-data` packaged into the environment.
+The `../docker/orekit-cr3bp/` directory contains an initial Docker setup for running Orekit CR3BP tutorials with Java, Orekit dependencies, and `orekit-data` packaged into the environment.
 
 This Docker work is a starting point toward containerizing the complete cislunar orbit-determination stack.
 
