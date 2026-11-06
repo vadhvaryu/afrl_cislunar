@@ -110,7 +110,7 @@ docker build --secret id=pip_cert,src=/path/to/ca-bundle.pem -f docker/od-stack/
 
 ## Tested
 
-On x86 (linux/amd64), Docker 29:
+On x86 (linux/amd64, Docker 29) and on an Apple silicon Mac (linux/arm64, Docker Desktop):
 
 - The image builds from `main` and from the latest `cr3bp-iod` (convergence study, CR3BP IOD
   methods and the config-whole-stack changes). `test` passes inside the image on both, read-only and
@@ -120,5 +120,8 @@ On x86 (linux/amd64), Docker 29:
   numbers in every field.
 - A read-only image with an arbitrary user ID (the Apptainer conditions) works.
 
-Not tested yet: a build on Apple silicon (linux/arm64) and a real Apptainer run. Both base images
-and every Python package are published for arm64, so the arm64 build should work.
+- Apple silicon: the native arm64 build passes `test` (15 on `main`) and the reference run agrees
+  with x86 to within 1e-7 m at the epoch and 5e-7 m at worst; the reported uncertainty is identical.
+  Those last-digit differences between processors are why `run.json` records the CPU.
+
+Not tested yet: a real Apptainer run on a cluster.
