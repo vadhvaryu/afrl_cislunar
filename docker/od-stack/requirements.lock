@@ -1,0 +1,27 @@
+# Exact versions installed in the cislunar-od image (Python 3.13, Debian bookworm).
+# Resolved from afrl_cislunar/requirements.txt inside the image's own base image, so every
+# build, on any machine, installs the same packages. To update after changing
+# requirements.txt, run:  docker/od-stack/lock.sh   and commit the result.
+pip==26.2.2
+astropy==8.0.2
+astropy-iers-data==0.2026.11.2.0.34.55
+contourpy==1.4.0
+cycler==0.12.1
+fonttools==4.68.0
+iniconfig==2.3.1
+jpype1==1.7.1
+kiwisolver==1.5.1
+matplotlib==3.11.2
+numpy==2.5.4
+orekit_jpype==13.1.9.0
+packaging==26.3
+pillow==13.0.0
+pluggy==1.7.0
+pyerfa==2.0.1.5
+Pygments==2.21.0
+pyparsing==3.3.3
+pytest==9.2.0
+python-dateutil==4.0.0
+PyYAML==6.0.3
+scipy==1.18.1
+tzdata==2026.6

@@ -308,13 +308,19 @@ This allows simulation stages to be changed without modifying the main pipeline 
 
 ## Docker / Containerization
 
-Containerization is currently in progress.
+The whole stack runs from one container image, `cislunar-od` (`docker/od-stack/`): Python 3.13, a
+Java 21 runtime for Orekit, pinned Python packages and pinned `orekit-data`. Build it from the
+repository root, then run it on a case folder:
 
-The `../docker/orekit-cr3bp/` directory contains an initial Docker setup for running Orekit CR3BP tutorials with Java, Orekit dependencies, and `orekit-data` packaged into the environment.
+```
+docker build -f docker/od-stack/Dockerfile -t cislunar-od:0.1.0 .
+docker run --rm -v "$PWD/case:/case" cislunar-od:0.1.0 run
+```
 
-This Docker work is a starting point toward containerizing the complete cislunar orbit-determination stack.
+Results land in `./case/results/`. See `docker/od-stack/README.md` for the commands, what is pinned,
+and running on NASA and DoD clusters with Apptainer.
 
-The full `od_stack` pipeline is not yet fully containerized in the current main branch.
+`docker/orekit-cr3bp/` holds the earlier image that runs the Orekit CR3BP Java tutorials.
 
 ## Current Limitations
 
@@ -342,5 +348,4 @@ Current and planned work includes:
 - Add higher-fidelity force models
 - Improve frame handling for real ephemerides
 - Continue convergence testing
-- Complete Docker containerization of the full simulation pipeline
 - Validate the stack on additional cislunar trajectories

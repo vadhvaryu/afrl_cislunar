@@ -1,0 +1,15 @@
+# Ignore list for docker/od-stack/Dockerfile (build context = repository root).
+# Only the code and this folder reach the image; outputs, virtual environments and caches stay out.
+*
+!afrl_cislunar
+!docker/od-stack
+afrl_cislunar/results
+afrl_cislunar/handoff
+afrl_cislunar/figures
+afrl_cislunar/orekit-data
+afrl_cislunar/.venv
+afrl_cislunar/venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.DS_Store
