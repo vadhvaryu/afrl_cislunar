@@ -112,9 +112,9 @@ docker build --secret id=pip_cert,src=/path/to/ca-bundle.pem -f docker/od-stack/
 
 On x86 (linux/amd64), Docker 29:
 
-- The image builds from `main` and from `cr3bp-iod` (which holds the convergence study and the
-  CR3BP IOD methods). `test` passes inside the image on both: 15 tests on `main`, 146 on
-  `cr3bp-iod`.
+- The image builds from `main` and from the latest `cr3bp-iod` (convergence study, CR3BP IOD
+  methods and the config-whole-stack changes). `test` passes inside the image on both, read-only and
+  as an arbitrary user: 15 tests on `main`; 147 on `cr3bp-iod`, the same as outside the container.
 - `run` on an empty case folder reproduces the stack's reference result (15.1 km at the epoch,
   52.9 km maximum over 8 days). Two runs in the container and one run outside it give identical
   numbers in every field.
