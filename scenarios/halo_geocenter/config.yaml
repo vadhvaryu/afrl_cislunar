@@ -1,0 +1,106 @@
+# ============================================================================
+# Cislunar orbit determination stack: one file controls every stage, in order.
+#
+#   1 data -> 2 measurements -> 3 iod -> 4 orbit -> 5 propagator_builder
+#     -> 6 estimation (BatchLSEstimator) -> 7 propagator -> 8 prediction (Orbit(t))
+#     -> 9 results / graphs
+#
+# Run:            python -m od_stack.run
+# Other file:     python -m od_stack.run --config my_scenario.yaml
+# Change simulation settings by editing this YAML; CLI overrides are not accepted.
+# Anything you delete from this file falls back to its default. Typos are reported before running.
+# ============================================================================
+
+system:                       # Earth-Moon CR3BP constants. Must match obs_generator.py.
+  mu: 0.0121505               # Moon / (Earth + Moon) mass
+  du_km: 384338.0             # distance unit
+  tu_s: 375099.0              # time unit
+
+# --- 1. Raw data -------------------------------------------------------------
+data:
+  source: csv                 # csv: read the observation file as-is
+                              # resample_truth: fresh noise on the truth file's noise-free angles
+                              #   (for experiments: many noise draws without editing any file)
+  observations: data/synthetic_obs.csv
+  truth: data/synthetic_truth.csv      # answer key for grading; use null to omit
+  noise_arcsec: 10            # resample_truth only: 1-sigma noise added to each angle
+  noise_seed: 0               # resample_truth only: change for a different random draw
+  observer: from_file         # from_file: observer columns if the file has them, else Earth's center
+                              # geocenter: always Earth's center
+  use_obs: all                # all, or a subset for the WHOLE stack, e.g. [0, 1, 2, 3]
+
+# --- 2. ObservedMeasurement list ----------------------------------------------
+measurements:
+  type: angular_radec         # RA/Dec angles (only type so far; range, range-rate later)
+  sigma_arcsec: from_file     # weight given to each angle: from_file, or a number to override
+  station_offset_m: 1.0       # geocenter "station" sits this far from Earth's center
+                              # (exactly 0 makes Orekit return NaN; 1 m changes angles ~0.0006")
+
+# --- 3. IOD (rough first orbit from the observations) --------------------------
+iod:
+  method: range_search        # range_search: CR3BP grid search over range and range-rate (works on our data)
+                              # truth_plus_error: TEST STAND-IN, reads the answer key
+                              # gooding | gauss | laplace: Orekit's two-body methods (fail on halo orbits)
+  epoch_index: 2              # observation the IOD state is placed at (2 = day 4, the middle)
+                              # (Orekit methods ignore this: they use the middle of obs_indices)
+
+  range_search:
+    range_km: [150000, 650000, 10000]      # [min, max, step] distance from Earth at the epoch
+    range_rate_m_s: [-800, 800, 50]        # [min, max, step] speed toward/away from Earth
+                                           # smaller steps = closer guess but slower (time ~ number of grid points)
+  orekit:                     # gooding / gauss / laplace
+    obs_indices: [0, 2, 4]    # the 3 observations used
+    range_guess_km: [350000, 350000]       # gooding only: guessed distance at the 1st and 3rd
+  truth_plus_error:
+    position_error_km: 1000   # how wrong the starting position is
+    velocity_error_m_s: 10    # how wrong the starting velocity is
+    seed: 0                   # direction of the error
+
+# --- 4. Orbit (how the IOD state is handed to Orekit) ---------------------------
+orbit:
+  type: cartesian             # cartesian (recommended): x, y, z, vx, vy, vz
+                              # equinoctial | keplerian: orbital elements around Earth. Keplerian elements
+                              #   mean little out here and keplerian breaks for near-circular orbits.
+                              # This also sets which 6 numbers Batch Least Squares adjusts.
+
+# --- 5. PropagatorBuilder (physics + integrator used by BLS and the Orekit propagator) ---
+propagator_builder:
+  force_model: cr3bp          # Earth gravity + Moon on the CR3BP circle (matches the truth data)
+                              # (real ephemerides with the Sun come later)
+  integrator: dormand_prince_853   # dormand_prince_853 (more accurate) | dormand_prince_54 (cheaper)
+  min_step_s: 0.001           # smallest step the integrator may take
+  max_step_s: 3600            # largest step (1 hour)
+  position_tolerance_m: 0.01  # integration accuracy target
+  position_scale_m: 1.0       # how BLS scales position when deciding it has converged
+
+# --- 6. Estimation (BatchLSEstimator: refine using ALL observations) -------------
+estimation:
+  method: orekit_bls          # orekit_bls | none (skip; propagate the IOD state directly)
+  optimizer: levenberg_marquardt   # levenberg_marquardt (robust from far away) | gauss_newton (faster near the answer)
+  max_iterations: 50          # give up after this many rounds
+  max_evaluations: 100
+  convergence_threshold: 0.001     # stop when corrections get this small
+  covariance: true            # also compute the 6x6 uncertainty
+
+# --- 7. Propagator (fitted orbit -> trajectory) ----------------------------------
+propagator:
+  method: orekit_cr3bp        # orekit_cr3bp: Orekit, same physics as BLS (uses section 5)
+                              # cr3bp: same physics in plain Python (independent check)
+                              # keplerian: Earth only (wrong out here; for comparison)
+
+# --- 8. Prediction (Orbit(t): which times to compute) -----------------------------
+prediction:
+  start_days: null            # null = first observation
+  end_days: null              # null = last observation; set later (e.g. 12) to predict past the data
+  points: 800                 # number of times between start and end
+
+# --- 9. Results / graphs ----------------------------------------------------------
+results:
+  dir: ../../outputs/halo_geocenter  # relative to this config
+  plot: true                  # results.png
+  csv: true                   # trajectory_comparison.csv
+  summary: true               # summary.json (errors, uncertainty, 6x6 covariance)
+  save_config: true           # config_used.yaml: the exact settings of this run, for reproducibility
+
+orekit:
+  data_path: null             # orekit-data folder; null = use the OREKIT_DATA environment variable

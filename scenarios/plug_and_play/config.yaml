@@ -1,0 +1,68 @@
+# All simulation choices live here. This file works natively and in Docker.
+schema_version: 1
+run:
+  name: halo_baseline
+  seed: 1
+
+system:
+  model: earth_moon_cr3bp
+  mu: 0.0121505
+  distance_unit_km: 384338.0
+  time_unit_s: 375099.0
+
+input:
+  source: synthetic          # synthetic or csv
+  observations: null        # CSV mode: data/observations.csv
+  truth: null               # optional original rotating-state truth CSV
+
+simulation:                 # used when input.source is synthetic
+  truth:
+    dynamics: cr3bp
+    epoch_days: 0.0          # relative to the original EMI frame origin
+    initial_state:
+      frame: barycentric_rotating
+      units: nondimensional
+      values: [0.872763, 0, 0.190505, 0, 0.235988, 0]
+    integrator:
+      method: DOP853
+      rtol: 1.0e-12
+      atol: 1.0e-12
+  observer:
+    type: geocenter          # fixed_emi also available with estimation disabled
+    position_km: [0, 0, 0]
+  observations:
+    type: angular_radec
+    times_days: [0, 2, 4, 6, 8]  # explicit schedule permits irregular cadence/gaps
+    noise:
+      distribution: gaussian
+      sigma_arcsec: 10
+
+determination:
+  dynamics: cr3bp
+  iod:
+    method: collocation     # range_search, gooding, gauss, laplace also available
+    epoch_index: 2
+    options:
+      mode: continuous
+      nodes: 80
+      initial_guess: auto
+  estimator:
+    method: orekit_bls      # none for a Java-free run
+    options: {}             # method-specific overrides; otherwise validated defaults
+
+prediction:
+  backend: orekit           # scipy for a Java-free run
+  start_days: 0
+  end_days: 12
+  points: 800
+
+evaluation:
+  enabled: true             # optional truth comparison; outputs never require truth
+
+output:
+  directory: outputs/halo_baseline
+  plots: true
+  observations: true
+
+runtime:
+  orekit_data: null         # image supplies bundled data; native fallback: OREKIT_DATA

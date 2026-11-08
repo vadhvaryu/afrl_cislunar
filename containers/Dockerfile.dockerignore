@@ -1,0 +1,13 @@
+.git
+.venv
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+**/.pytest_cache
+**/build
+**/dist
+**/results
+**/output
+**/hs_err_pid*.log
+archive
+outputs

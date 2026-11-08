@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cislunar-stack"
+version = "0.1.0"
+description = "Configurable cislunar orbit determination and propagation pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["numpy>=2,<3", "scipy>=1.14,<2", "matplotlib>=3.9,<4", "pyyaml>=6,<7"]
+
+[project.optional-dependencies]
+orekit = ["orekit-jpype==13.1.9.0"]
+test = ["pytest>=8,<10"]
+examples = ["astropy"]
+
+[project.scripts]
+cislunar-stack = "od_stack.run:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
