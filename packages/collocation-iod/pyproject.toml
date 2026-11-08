@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "collocation-iod"
+version = "0.1.0"
+description = "Cislunar initial orbit determination and maneuver reconstruction by Hermite-Simpson collocation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0,<3",
+    "scipy>=1.14,<2",
+    "casadi>=3.7,<4",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+orekit = ["orekit-jpype==13.1.9.0"]
+stack = ["orekit-jpype==13.1.9.0", "matplotlib>=3.9,<4", "pyyaml>=6,<7"]
+
+[project.scripts]
+collocation-iod = "collocation_iod.cli:main"
+collocation-iod-stack = "collocation_iod.adapters:stack_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

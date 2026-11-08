@@ -1,0 +1,27 @@
+# Build from repository root: docker build -f containers/Dockerfile.solver -t collocation-iod .
+# The default image needs neither Java nor external ephemeris data.
+FROM python:3.13-slim-bookworm AS core
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY packages/collocation-iod/requirements.lock ./requirements.lock
+RUN python -m pip install --no-cache-dir -r requirements.lock
+COPY packages/collocation-iod/pyproject.toml packages/collocation-iod/README.md ./
+COPY packages/collocation-iod/src ./src
+RUN python -m pip install --no-cache-dir --no-deps .
+COPY packages/collocation-iod/examples ./examples
+RUN collocation-iod /app/examples/synthetic_obs.csv --output /tmp/smoke.json
+RUN mkdir /output
+ENTRYPOINT ["collocation-iod"]
+CMD ["/app/examples/synthetic_obs.csv"]
+
+# Optional bridge target; callers still supply actual Orekit frame/date objects.
+# Build: docker build -f containers/Dockerfile.solver --target orekit -t collocation-iod:orekit .
+FROM core AS orekit
+RUN apt-get update && apt-get install -y --no-install-recommends openjdk-17-jre-headless \
+    && rm -rf /var/lib/apt/lists/*
+RUN python -m pip install --no-cache-dir "orekit-jpype==13.1.9.0"
+
+# Keep the lightweight, complete numerical solver as the default final target.
+FROM core AS standalone

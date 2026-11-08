@@ -1,0 +1,22 @@
+schema_version: 1
+run:
+  name: local_observations
+input:
+  source: csv
+  observations: data/synthetic_obs.csv  # relative to the mounted input directory
+  truth: null                          # estimation and output need no answer key
+determination:
+  iod:
+    method: collocation
+    options:
+      nodes: 80
+  estimator:
+    method: orekit_bls
+prediction:
+  backend: orekit
+  end_days: 12
+evaluation:
+  enabled: false
+output:
+  directory: outputs/local_observations
+  plots: true

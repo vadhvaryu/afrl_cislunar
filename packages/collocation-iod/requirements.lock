@@ -1,0 +1,5 @@
+# Numerical versions exercised by the implementation's tests.
+# Python 3.13; these packages provide wheels containing the numerical runtime.
+numpy==2.5.4
+scipy==1.18.1
+casadi==3.8.2

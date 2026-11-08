@@ -1,0 +1,11 @@
+schema_version: 1
+run:
+  name: container_build_check
+input:
+  source: synthetic
+prediction:
+  end_days: 8
+  points: 50
+output:
+  directory: /tmp/cislunar-smoke
+  plots: false
