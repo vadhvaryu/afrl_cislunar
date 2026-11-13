@@ -1,8 +1,11 @@
 # Benchmark work
 
-This directory reserves a separate home for future repeatable noise, geometry,
-cadence, and observation-update studies. No new benchmark coverage is implied by
-the reorganization. Existing numerical tests live beside their packages; the
+This directory holds repeatable noise, geometry, cadence, and observation-update
+studies.
+
+| Study | What it answers |
+|---|---|
+| [`collocation_iod/`](collocation_iod/RESULTS.md) | Does the collocation IOD work in the stack, and how does it compare with range search, the two-body methods and the Part B methods across arc lengths and noise levels? | Existing numerical tests live beside their packages; the
 full-stack verification entry point is:
 
 ```text
