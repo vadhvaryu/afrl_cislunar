@@ -22,7 +22,7 @@ SCHEMA = {
     },
     "determination": {
         "dynamics": "cr3bp",
-        "iod": {"method": "collocation", "epoch_index": 2, "options": {}},
+        "iod": {"method": "collocation", "epoch_index": 2, "options": {}, "fallback": ["range_search"]},
         "estimator": {"method": "orekit_bls", "options": {}},
         "advanced": {"orbit_type": "cartesian", "station_offset_m": 1.0,
                      "integrator": "dormand_prince_853", "min_step_s": 0.001,
@@ -163,7 +163,9 @@ def normalize(config):
         "simulation": {**copy.deepcopy(sim), "seed": c["run"]["seed"]},
         "evaluation": c["evaluation"],
         "run": c["run"],
-        "iod": {"method": iod["method"], "epoch_index": iod["epoch_index"], block: iod_options},
+        "iod": {"method": iod["method"], "epoch_index": iod["epoch_index"], block: iod_options,
+                "fallback": [f for f in iod["fallback"] if f != iod["method"]] if isinstance(iod["fallback"], list)
+                else iod["fallback"]},
         "estimation": {"method": estimator["method"], **est_options},
         "orbit": {"type": advanced["orbit_type"]},
         "measurements": {"station_offset_m": advanced["station_offset_m"]},

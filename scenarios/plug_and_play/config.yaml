@@ -43,12 +43,14 @@ determination:
     method: collocation     # range_search, gooding, gauss, laplace also available
     epoch_index: 2
     options:
-      mode: continuous
-      nodes: 80
+      mode: continuous      # impulsive/hybrid estimate burns; they need estimator method none for now
+      nodes: 80             # about 10 per day of arc (checked before computation)
       initial_guess: auto
+    fallback: [range_search]  # tried in order if the IOD fails or its fit fails the residual check
   estimator:
     method: orekit_bls      # none for a Java-free run
-    options: {}             # method-specific overrides; otherwise validated defaults
+    options:                # method-specific overrides; otherwise validated defaults
+      residual_gate_sigma: 3  # reject fits whose residual RMS exceeds 3 sigma (wrong orbits); null = off
 
 prediction:
   backend: orekit           # scipy for a Java-free run

@@ -33,15 +33,19 @@ from .sources import dense_truth, load_observations, load_synthetic_truth, selec
 DAY = 86400.0
 
 
+def build_iod(cfg: dict, sys: EarthMoonSystem, method: str | None = None):
+    """The IOD stage for `method` (default: iod.method), with its options from the config."""
+    icfg = cfg["iod"]
+    iod_cls = IOD_METHODS[method or icfg["method"]]
+    return iod_cls(sys, orekit_data=cfg["orekit"]["data_path"], truth_path=cfg["data"].get("truth"),
+                   epoch_index=icfg["epoch_index"], **icfg.get(iod_cls.config_block, {}))
+
+
 def build_stages(cfg: dict, sys: EarthMoonSystem):
     """Create the IOD, estimator and propagator objects the config asks for."""
     orekit_data = cfg["orekit"]["data_path"]
     builder = cfg["propagator_builder"]
-
-    icfg = cfg["iod"]
-    iod_cls = IOD_METHODS[icfg["method"]]
-    iod = iod_cls(sys, orekit_data=orekit_data, truth_path=cfg["data"].get("truth"),
-                  epoch_index=icfg["epoch_index"], **icfg.get(iod_cls.config_block, {}))
+    iod = build_iod(cfg, sys)
 
     ecfg = {k: v for k, v in cfg["estimation"].items() if k != "method"}
     estimator = ESTIMATORS[cfg["estimation"]["method"]](
@@ -61,6 +65,56 @@ def prediction_times(cfg: dict, obs) -> np.ndarray:
     return np.linspace(start, end, int(p["points"]))
 
 
+COLLOCATION_NODES_PER_DAY, COLLOCATION_MIN_NODES = 10, 20
+
+
+def collocation_nodes_needed(obs) -> int:
+    """Mesh nodes collocation needs for this arc: 80 passed and 40 failed the solver's mesh check on 8-day
+    arcs, while 40 was enough for 1 day (benchmarks/collocation_iod), so about 10 per day of arc."""
+    return max(COLLOCATION_MIN_NODES, int(np.ceil(COLLOCATION_NODES_PER_DAY * (obs.t.max() - obs.t.min()) / DAY)))
+
+
+def determine(cfg: dict, sys: EarthMoonSystem, obs, iod, estimator):
+    """IOD then estimation, trying the fallback IOD methods in order when the IOD fails or the estimator
+    rejects its fit (e.g. the residual check). Returns (IOD state, final state, IOD used, attempts)."""
+    attempts = []
+    for k, name in enumerate([cfg["iod"]["method"], *cfg["iod"].get("fallback", [])]):
+        stage = iod if k == 0 else build_iod(cfg, sys, name)
+        try:
+            x_iod = stage.estimate(obs)
+        except IODFailure as e:
+            attempts.append({"iod": name, "ok": False, "failed_at": "iod", "error": str(e)[:300]})
+            continue
+        try:
+            x0 = estimator.refine(obs, x_iod)
+        except EstimationFailure as e:
+            rejected = getattr(e, "state", None)
+            attempts.append({"iod": name, "ok": False, "failed_at": "estimation", "error": str(e)[:300],
+                             "rms_normalized_residual": (rejected.info.get("rms_normalized_residual")
+                                                         if rejected is not None else None)})
+            continue
+        attempts.append({"iod": name, "ok": True, "rms_normalized_residual": x0.info.get("rms_normalized_residual")})
+        return x_iod, x0, stage, attempts
+    tried = "; ".join(f"{a['iod']} ({a['failed_at']}): {a['error']}" for a in attempts)
+    raise EstimationFailure(f"no IOD method gave an acceptable orbit. Tried {tried}")
+
+
+def provenance() -> dict:
+    """Versions and machine, so a result can be tied to what produced it (results differ in the last digits
+    between processors, and collocation's local optimizer can settle differently on another platform)."""
+    import platform
+    from importlib import metadata
+
+    versions = {}
+    for pkg in ("cislunar-stack", "collocation-iod", "numpy", "scipy", "casadi", "orekit-jpype", "JPype1"):
+        try:
+            versions[pkg] = metadata.version(pkg)
+        except metadata.PackageNotFoundError:
+            versions[pkg] = None
+    return {"python": platform.python_version(), "machine": platform.machine(), "os": platform.platform(),
+            "container_image": os.environ.get("CISLUNAR_IMAGE"), "packages": versions}
+
+
 def validate_observations(obs, cfg):
     if (len(obs) < 3 or not np.isfinite(obs.t).all() or np.any(np.diff(obs.t) <= 0)
             or not np.isfinite(obs.los).all() or not np.isfinite(obs.observer).all()
@@ -72,6 +126,12 @@ def validate_observations(obs, cfg):
         raise ConfigError("IOD epoch_index lies outside the observation arc")
     if cfg["iod"]["method"] == "range_search" and np.any(obs.sigma <= 0):
         raise ConfigError("range_search requires strictly positive angular uncertainties")
+    if cfg["iod"]["method"] == "collocation" or "collocation" in cfg["iod"].get("fallback", []):
+        nodes = int((cfg["iod"].get("collocation") or {}).get("nodes", 80))
+        need = collocation_nodes_needed(obs)
+        if nodes < need:
+            raise ConfigError(f"collocation needs at least {need} mesh nodes for this {(obs.t.max() - obs.t.min()) / DAY:.1f}-day "
+                              f"arc (about {COLLOCATION_NODES_PER_DAY} per day); determination.iod.options.nodes is {nodes}")
     if cfg["estimation"]["method"] == "orekit_bls":
         if np.any(np.linalg.norm(obs.observer, axis=1) > 1):
             raise ConfigError("orekit_bls currently requires a geocenter observer")
@@ -105,12 +165,12 @@ def run(user_cfg: dict, make_files: bool = True) -> dict:
     if make_files:
         out.mkdir(parents=True, exist_ok=True)
     iod, estimator, prop = build_stages(cfg, sys)
-    x_iod = iod.estimate(obs)                                 # 3    IOD -> rough orbit
-    x0 = estimator.refine(obs, x_iod)                         # 4-6  orbit -> builder -> BLS
+    x_iod, x0, iod, attempts = determine(cfg, sys, obs, iod, estimator)   # 3-6  IOD -> BLS (with fallbacks)
     est = prop.propagate(x0, t_out)                           # 7-8  propagator -> Orbit(t)
 
     truth = truth_at(t_out) if truth_at else None
-    summary = {"method": x0.method, "epoch_days": x0.t / DAY, "info": x0.info,
+    summary = {"method": x0.method, "epoch_days": x0.t / DAY, "info": x0.info, "attempts": attempts,
+               "provenance": provenance(),
                "covariance_available": x0.cov is not None, "evaluation_available": truth is not None,
                "run_name": cfg["run"]["name"]}
     if x0.cov is not None:
@@ -145,6 +205,7 @@ def compare_iod(user_cfg: dict) -> None:
     for name in IOD_METHODS:
         c = copy.deepcopy(user_cfg)
         c.setdefault("iod", {})["method"] = name
+        c["iod"]["fallback"] = []               # compare each method on its own
         try:
             s = run(c, make_files=False)
             tag = "  (test stand-in)" if name == "truth_plus_error" else ""

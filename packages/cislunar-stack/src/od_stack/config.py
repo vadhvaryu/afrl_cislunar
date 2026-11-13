@@ -36,6 +36,7 @@ DEFAULTS: dict = {
         "range_search": {"range_km": [150000, 650000, 10000], "range_rate_m_s": [-800, 800, 50]},
         "orekit": {"obs_indices": [0, 2, 4], "range_guess_km": [350000, 350000]},
         "truth_plus_error": {"position_error_km": 1000.0, "velocity_error_m_s": 10.0, "seed": 0},
+        "fallback": [],             # IOD methods to try, in order, if the first fails or its fit fails the check
     },
     "orbit": {"type": "cartesian"},
     "propagator_builder": {
@@ -53,6 +54,7 @@ DEFAULTS: dict = {
         "max_evaluations": 100,
         "convergence_threshold": 0.001,
         "covariance": True,
+        "residual_gate_sigma": 3.0,  # reject a fit whose residual RMS exceeds this many sigmas; null = off
     },
     "propagator": {"method": "orekit_cr3bp"},
     "prediction": {"start_days": None, "end_days": None, "points": 800},
@@ -198,6 +200,25 @@ def prepare(user_cfg: dict) -> dict:
             problems.append(f"iod.range_search.{key} must be [min, max, step] with max > min and step > 0")
     if cfg["estimation"]["method"] == "orekit_bls" and cfg["orbit"]["type"] == "keplerian":
         pass  # allowed, but see the comment in config.yaml
+    gate = cfg["estimation"].get("residual_gate_sigma")
+    if gate is not None and not (finite_number(gate) and gate > 0):
+        problems.append("estimation.residual_gate_sigma must be a positive number or null (off)")
+    fallback = cfg["iod"].get("fallback")
+    if not (isinstance(fallback, list) and all(isinstance(f, str) for f in fallback)):
+        problems.append("iod.fallback must be a list of IOD method names")
+    else:
+        for f in fallback:
+            if f not in IOD_METHODS or f == "truth_plus_error":
+                problems.append(f"iod.fallback: '{f}' is not a product IOD method "
+                                f"(choose from: {', '.join(k for k in IOD_METHODS if k != 'truth_plus_error')})")
+        if len(set(fallback)) != len(fallback):
+            problems.append("iod.fallback lists a method twice")
+    uses_collocation = cfg["iod"]["method"] == "collocation" or "collocation" in (fallback or [])
+    mode = (cfg["iod"].get("collocation") or {}).get("mode", "continuous")
+    if uses_collocation and mode in ("impulsive", "hybrid") and cfg["estimation"]["method"] == "orekit_bls":
+        problems.append(f"collocation mode '{mode}' estimates burns, but orekit_bls assumes the spacecraft coasts and "
+                        "would discard them; use estimation method none to keep collocation's trajectory, "
+                        "or mode continuous")
 
     if problems:
         raise ConfigError("config.yaml has problems:\n  - " + "\n  - ".join(problems))

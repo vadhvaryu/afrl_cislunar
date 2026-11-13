@@ -129,7 +129,30 @@ Two-body `gooding`, `gauss`, and `laplace` are available for appropriate cases;
 they are not reliable choices for the baseline halo. `truth_plus_error` is kept
 only in the legacy test interface. Collocation options correspond to `SolverOptions`.
 Estimator options include `optimizer`, iteration/evaluation limits,
-`convergence_threshold`, and `covariance`.
+`convergence_threshold`, `covariance`, and `residual_gate_sigma`.
+
+### Residual check and IOD fallback
+
+`determination.estimator.options.residual_gate_sigma` (default 3) rejects a batch least-squares
+fit whose residual RMS, in measurement standard deviations, exceeds that value. Correct fits stayed
+at or below 1.6 at 1–100″ noise; wrong local solutions were at hundreds
+([benchmarks](../benchmarks/collocation_iod/RESULTS.md)). Set it to `null` to turn the check off.
+Below about 0.5″ noise it can reject correct fits, because Orekit's angles include light time and
+the synthetic generator's do not.
+
+`determination.iod.fallback` (default `[range_search]`) lists IOD methods to try, in order, when the
+selected IOD fails or the estimator rejects its fit. The first fit that passes is used. The summary
+records every attempt under `attempts`, and `iod` names the method that produced the result. If none
+passes, the run stops with an error listing each attempt. Use `fallback: []` to run one method only.
+
+Collocation's `impulsive` and `hybrid` modes estimate burns, which `orekit_bls` cannot represent; that
+combination is rejected before computation (use `estimator: method: none` to keep the collocation
+trajectory). Collocation also needs about 10 mesh nodes per day of observation arc (minimum 20); a
+coarser mesh is rejected once the observation times are known, before any computation.
+
+Every `summary.json` records `provenance`: Python, package versions, machine and OS. Collocation's
+optimizer can settle on slightly different solutions on different platforms, so compare runs made
+with the same container image.
 
 ## Output contract
 
