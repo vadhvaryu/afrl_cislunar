@@ -33,7 +33,9 @@ DEFAULTS: dict = {
     "iod": {
         "method": "range_search",
         "epoch_index": 2,
-        "range_search": {"range_km": [150000, 650000, 10000], "range_rate_m_s": [-800, 800, 50]},
+        # The grid only has to put a start in the right valley; polishing does the rest (iod.RangeSearch).
+        "range_search": {"range_km": [150000, 650000, 20000], "range_rate_m_s": [-800, 800, 100],
+                         "refine": True, "candidates": 12, "max_candidates": 20},
         "orekit": {"obs_indices": [0, 2, 4], "range_guess_km": [350000, 350000]},
         "truth_plus_error": {"position_error_km": 1000.0, "velocity_error_m_s": 10.0, "seed": 0},
         "fallback": [],             # IOD methods to try, in order, if the first fails or its fit fails the check
@@ -54,7 +56,8 @@ DEFAULTS: dict = {
         "max_evaluations": 100,
         "convergence_threshold": 0.001,
         "covariance": True,
-        "residual_gate_sigma": 3.0,  # reject a fit whose residual RMS exceeds this many sigmas; null = off
+        "residual_gate_sigma": None,  # reject a fit whose residual RMS exceeds this many sigmas; null = off.
+                                      # Off here (legacy configs, tests); the YAML product turns it on at 3.
     },
     "propagator": {"method": "orekit_cr3bp"},
     "prediction": {"start_days": None, "end_days": None, "points": 800},
@@ -198,6 +201,12 @@ def prepare(user_cfg: dict) -> dict:
         r = cfg["iod"]["range_search"].get(key)
         if not (isinstance(r, list) and len(r) == 3 and r[2] > 0 and r[1] > r[0]):
             problems.append(f"iod.range_search.{key} must be [min, max, step] with max > min and step > 0")
+    rs = cfg["iod"]["range_search"]
+    if type(rs.get("refine", True)) is not bool:
+        problems.append("iod.range_search.refine must be true or false")
+    for key in ("candidates", "max_candidates"):
+        if type(rs.get(key, 4)) is not int or rs.get(key, 4) < 1:
+            problems.append(f"iod.range_search.{key} must be a positive integer")
     if cfg["estimation"]["method"] == "orekit_bls" and cfg["orbit"]["type"] == "keplerian":
         pass  # allowed, but see the comment in config.yaml
     gate = cfg["estimation"].get("residual_gate_sigma")
@@ -213,6 +222,8 @@ def prepare(user_cfg: dict) -> dict:
                                 f"(choose from: {', '.join(k for k in IOD_METHODS if k != 'truth_plus_error')})")
         if len(set(fallback)) != len(fallback):
             problems.append("iod.fallback lists a method twice")
+        if cfg["iod"]["method"] in fallback:
+            problems.append("iod.fallback repeats iod.method; list only the other methods to try")
     uses_collocation = cfg["iod"]["method"] == "collocation" or "collocation" in (fallback or [])
     mode = (cfg["iod"].get("collocation") or {}).get("mode", "continuous")
     if uses_collocation and mode in ("impulsive", "hybrid") and cfg["estimation"]["method"] == "orekit_bls":

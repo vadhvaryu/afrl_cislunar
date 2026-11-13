@@ -72,8 +72,11 @@ class OrekitBatchLS:
         return LevenbergMarquardtOptimizer()
 
     def _cartesian_covariance(self, estimator, fitted_orbit):
-        """6x6 covariance in x, y, z, vx, vy, vz (SI), whatever orbit type was estimated."""
-        C = estimator.getPhysicalCovariances(1e-12)
+        """6x6 covariance in x, y, z, vx, vy, vz (SI), whatever orbit type was estimated.
+        The singularity threshold is 1e-16, not Orekit's usual 1e-12: with 1 m position scaling, short arcs
+        trip 1e-12 although their normal matrix is well conditioned (condition number ~300-20,000 on 1-day
+        and 6-hour arcs), and the covariance then computed matched the actual errors (benchmarks/collocation_iod)."""
+        C = estimator.getPhysicalCovariances(1e-16)
         if self.orbit_type == "cartesian":
             return np.array([[C.getEntry(i, j) for j in range(6)] for i in range(6)])
         from org.orekit.orbits import OrbitType, PositionAngleType
@@ -109,7 +112,10 @@ class OrekitBatchLS:
         from .orekit_models import frame_and_epoch, propagator_builder
 
         frame, _ = frame_and_epoch()
-        builder = propagator_builder(self.sys, x0.t, x0.r, x0.v, self.builder_settings, self.orbit_type)
+        try:        # e.g. a hyperbolic starting state cannot be written as equinoctial elements
+            builder = propagator_builder(self.sys, x0.t, x0.r, x0.v, self.builder_settings, self.orbit_type)
+        except Exception as e:
+            raise EstimationFailure(f"{self.name}: cannot start from this state: {str(e).splitlines()[0]}") from e
         estimator = BatchLSEstimator(self._optimizer(), builder)
         estimator.setParametersConvergenceThreshold(self.threshold)
         estimator.setMaxIterations(self.max_iter)
@@ -133,7 +139,7 @@ class OrekitBatchLS:
             try:
                 cov = self._cartesian_covariance(estimator, fitted.getInitialState().getOrbit())
             except Exception:
-                cov = None    # happens at very high noise; worth investigating
+                cov = None    # the observations leave some direction of the state undetermined
         rms = float(estimator.getOptimum().getRMS())
         fit = StateEstimate(
             t=x0.t,

@@ -74,22 +74,42 @@ def collocation_nodes_needed(obs) -> int:
     return max(COLLOCATION_MIN_NODES, int(np.ceil(COLLOCATION_NODES_PER_DAY * (obs.t.max() - obs.t.min()) / DAY)))
 
 
+def size_collocation_mesh(cfg: dict, obs) -> str | None:
+    """Give collocation (as the IOD method or a fallback) at least the mesh nodes this arc needs, raising
+    iod.collocation.nodes if it is lower. Returns a note when it changed the setting, else None."""
+    if cfg["iod"]["method"] != "collocation" and "collocation" not in cfg["iod"].get("fallback", []):
+        return None
+    block = cfg["iod"].setdefault("collocation", {})
+    nodes, need = int(block.get("nodes", 80)), collocation_nodes_needed(obs)
+    if nodes >= need:
+        return None
+    block["nodes"] = need
+    return (f"collocation used {need} mesh nodes instead of {nodes}: this "
+            f"{(obs.t.max() - obs.t.min()) / DAY:.1f}-day arc needs about {COLLOCATION_NODES_PER_DAY} per day")
+
+
 def determine(cfg: dict, sys: EarthMoonSystem, obs, iod, estimator):
     """IOD then estimation, trying the fallback IOD methods in order when the IOD fails or the estimator
-    rejects its fit (e.g. the residual check). Returns (IOD state, final state, IOD used, attempts)."""
+    rejects its fit (e.g. the residual check). Returns (IOD state, final state, IOD used, attempts).
+    Any error inside a method (including one raised by Java) counts as that method failing; only
+    configuration errors stop the run."""
     attempts = []
     for k, name in enumerate([cfg["iod"]["method"], *cfg["iod"].get("fallback", [])]):
-        stage = iod if k == 0 else build_iod(cfg, sys, name)
         try:
+            stage = iod if k == 0 else build_iod(cfg, sys, name)
             x_iod = stage.estimate(obs)
-        except IODFailure as e:
-            attempts.append({"iod": name, "ok": False, "failed_at": "iod", "error": str(e)[:300]})
+        except ConfigError:
+            raise
+        except Exception as e:
+            attempts.append({"iod": name, "ok": False, "failed_at": "iod", "error": f"{_reason(e)}"[:300]})
             continue
         try:
             x0 = estimator.refine(obs, x_iod)
-        except EstimationFailure as e:
+        except ConfigError:
+            raise
+        except Exception as e:
             rejected = getattr(e, "state", None)
-            attempts.append({"iod": name, "ok": False, "failed_at": "estimation", "error": str(e)[:300],
+            attempts.append({"iod": name, "ok": False, "failed_at": "estimation", "error": _reason(e)[:300],
                              "rms_normalized_residual": (rejected.info.get("rms_normalized_residual")
                                                          if rejected is not None else None)})
             continue
@@ -97,6 +117,42 @@ def determine(cfg: dict, sys: EarthMoonSystem, obs, iod, estimator):
         return x_iod, x0, stage, attempts
     tried = "; ".join(f"{a['iod']} ({a['failed_at']}): {a['error']}" for a in attempts)
     raise EstimationFailure(f"no IOD method gave an acceptable orbit. Tried {tried}")
+
+
+def _reason(e: Exception) -> str:
+    """One-line reason for a failure; names the error type unless it is one of ours."""
+    text = (str(e).splitlines() or [""])[0]
+    return text if isinstance(e, (IODFailure, EstimationFailure)) else f"{type(e).__name__}: {text}"
+
+
+SHORT_ARC_DAYS, VERY_SHORT_ARC_DAYS = 2.0, 0.5
+
+
+def quality_warnings(cfg: dict, obs, x0) -> list[str]:
+    """Plain-language warnings for results that should not be trusted at face value. In testing, wrong fits
+    on 1-day and 6-hour arcs passed the residual check (the angles fit several orbits equally well); range
+    search lists those other orbits; and on 6-hour arcs the covariance understated the error
+    (benchmarks/collocation_iod/IMPROVEMENTS.md)."""
+    warnings = []
+    arc_days = float(obs.t.max() - obs.t.min()) / DAY
+    geocenter = not np.any(np.linalg.norm(obs.observer, axis=1) > 1)
+    if arc_days < SHORT_ARC_DAYS and geocenter:
+        warnings.append(f"The observations span only {arc_days:.2g} days from Earth's center, so the distance to the "
+                        "object is poorly determined: in testing, arcs of 1 day or less often gave orbits thousands of "
+                        "km off that still fit the angles. Treat this orbit as uncertain; longer arcs help.")
+    if arc_days < VERY_SHORT_ARC_DAYS and geocenter:
+        warnings.append("On arcs this short the reported uncertainty itself is unreliable: in testing on 6-hour arcs "
+                        "the actual error was up to 35 times the reported 1-sigma, and the covariance was often missing.")
+    alternatives = (x0.info or {}).get("alternatives") or []
+    if alternatives:
+        far = max(a["distance_from_chosen_km"] for a in alternatives)
+        warnings.append(f"{len(alternatives)} other orbit(s), up to {far:,.0f} km away, fit the angles about as well "
+                        "(info.alternatives). The data cannot tell them apart and the reported uncertainty covers only "
+                        "the chosen one; more observations or a longer arc are needed to decide.")
+    if cfg["estimation"]["method"] != "none" and cfg["estimation"].get("covariance", True) and x0.cov is None:
+        warnings.append("The fit's uncertainty (covariance) could not be computed. This usually means the "
+                        "observations do not pin down the orbit; treat the result as unreliable.")
+    return warnings
 
 
 def provenance() -> dict:
@@ -126,12 +182,6 @@ def validate_observations(obs, cfg):
         raise ConfigError("IOD epoch_index lies outside the observation arc")
     if cfg["iod"]["method"] == "range_search" and np.any(obs.sigma <= 0):
         raise ConfigError("range_search requires strictly positive angular uncertainties")
-    if cfg["iod"]["method"] == "collocation" or "collocation" in cfg["iod"].get("fallback", []):
-        nodes = int((cfg["iod"].get("collocation") or {}).get("nodes", 80))
-        need = collocation_nodes_needed(obs)
-        if nodes < need:
-            raise ConfigError(f"collocation needs at least {need} mesh nodes for this {(obs.t.max() - obs.t.min()) / DAY:.1f}-day "
-                              f"arc (about {COLLOCATION_NODES_PER_DAY} per day); determination.iod.options.nodes is {nodes}")
     if cfg["estimation"]["method"] == "orekit_bls":
         if np.any(np.linalg.norm(obs.observer, axis=1) > 1):
             raise ConfigError("orekit_bls currently requires a geocenter observer")
@@ -164,12 +214,14 @@ def run(user_cfg: dict, make_files: bool = True) -> dict:
         raise ConfigError(f"output.directory must be inside the mounted output directory: {output_root}")
     if make_files:
         out.mkdir(parents=True, exist_ok=True)
+    notes = [n for n in [size_collocation_mesh(cfg, obs)] if n]
     iod, estimator, prop = build_stages(cfg, sys)
     x_iod, x0, iod, attempts = determine(cfg, sys, obs, iod, estimator)   # 3-6  IOD -> BLS (with fallbacks)
     est = prop.propagate(x0, t_out)                           # 7-8  propagator -> Orbit(t)
 
     truth = truth_at(t_out) if truth_at else None
     summary = {"method": x0.method, "epoch_days": x0.t / DAY, "info": x0.info, "attempts": attempts,
+               "warnings": quality_warnings(cfg, obs, x0), "notes": notes,
                "provenance": provenance(),
                "covariance_available": x0.cov is not None, "evaluation_available": truth is not None,
                "run_name": cfg["run"]["name"]}

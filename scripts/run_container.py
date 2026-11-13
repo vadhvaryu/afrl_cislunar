@@ -65,6 +65,7 @@ def main(argv=None):
         commands = []
         if args.build:
             commands.append(["docker", "build", "-f", str(ROOT / "containers/Dockerfile"),
+                             "--build-arg", f"IMAGE_TAG={args.image}",    # recorded in each run's provenance
                              "-t", args.image, str(ROOT)])
         commands.append(run_command)
         if args.dry_run:

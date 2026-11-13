@@ -12,6 +12,8 @@ ARG JAVA_IMAGE=eclipse-temurin:21-jre@sha256:0b99b3376fbb50dbf9c0af8535fdd5b8eb0
 FROM ${JAVA_IMAGE} AS java
 
 FROM ${PYTHON_IMAGE}
+# The image name each run records in summary.json (provenance). Pass the same name as -t:
+#   docker build --build-arg IMAGE_TAG=my-name -t my-name ...   (scripts/run_container.py --build does this)
 ARG IMAGE_TAG=cislunar-stack:local
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
     MPLBACKEND=Agg MPLCONFIGDIR=/tmp/matplotlib OREKIT_DATA=/opt/orekit-data \

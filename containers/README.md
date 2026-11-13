@@ -26,7 +26,7 @@ running Docker. The launcher needs only standard-library Python on the host.
 For direct Docker usage, build from the repository root:
 
 ```text
-docker build -f containers/Dockerfile -t cislunar-stack:local .
+docker build -f containers/Dockerfile --build-arg IMAGE_TAG=cislunar-stack:local -t cislunar-stack:local .
 ```
 
 Then mount a config, data directory, and output directory as above. Running the

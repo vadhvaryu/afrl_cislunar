@@ -7,9 +7,8 @@ input:
   truth: null                          # estimation and output need no answer key
 determination:
   iod:
-    method: collocation
-    options:
-      nodes: 80
+    method: range_search
+    fallback: [collocation]
   estimator:
     method: orekit_bls
 prediction:

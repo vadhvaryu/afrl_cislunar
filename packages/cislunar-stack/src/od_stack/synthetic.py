@@ -34,14 +34,22 @@ class SyntheticTruth:
         return Trajectory(t=t, r=np.array([r for r, v in rv]), v=np.array([v for r, v in rv]), label="Truth")
 
 
+SPEED_OF_LIGHT_M_S = 299_792_458.0
+
+
 def generate(settings, system):
-    """Return observations and a truth evaluator; truth never enters the estimator."""
+    """Return observations and a truth evaluator; truth never enters the estimator.
+    With observations.light_time (the default), each line of sight points to where the object was when the
+    light left it, as a telescope sees it and as Orekit's angle model assumes; about 0.6-0.8 arcsec for a
+    halo orbit. Without it, the angles disagree with Orekit's by that much, which dominates below ~1 arcsec."""
     truth = SyntheticTruth(settings["truth"], system)
     t = np.asarray(settings["observations"]["times_days"], dtype=float) * 86400
-    trajectory = truth.at(t)
     position = np.asarray(settings["observer"]["position_km"]) * 1000
-    observers = np.broadcast_to(position, trajectory.r.shape).copy()
-    delta = trajectory.r - observers
+    observers = np.broadcast_to(position, (len(t), 3)).copy()
+    emitted = t
+    for _ in range(3 if settings["observations"].get("light_time", True) else 0):   # converges in 2
+        emitted = t - np.linalg.norm(truth.at(emitted).r - observers, axis=1) / SPEED_OF_LIGHT_M_S
+    delta = truth.at(emitted).r - observers
     ranges = np.linalg.norm(delta, axis=1)
     if np.any(ranges <= 0):
         raise ValueError("Observer and target cannot coincide")
