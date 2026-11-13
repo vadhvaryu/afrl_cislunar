@@ -40,33 +40,66 @@ ARCS = {
 NOISE_ARCSEC = (1.0, 10.0, 100.0)
 SEEDS = range(10)
 METHODS = ("collocation", "range_search", "gooding", "gauss", "laplace")
+PRODUCT = "product"                # collocation, falling back to range search
+PRODUCT_RS = "product_rs"          # range search, falling back to collocation
+PRODUCTS = {PRODUCT: ("collocation", ["range_search"]), PRODUCT_RS: ("range_search", ["collocation"])}
 REFERENCE = "truth_start"          # BLS from the true state: the fit every IOD should lead to
+
+# Orbit study (Keira's question, on this harness): periodic states in our CR3BP, corrected from the
+# MIT-licensed cislunar-custody seeds (od_stack/orbit_catalog.py on the cr3bp-iod branch).
+ORBITS = {
+    "L1 halo (baseline)": [0.8727638863136087, 0.0, 0.190505, 0.0, 0.23598602025575388, 0.0],
+    "L1 halo, small": [0.8247698373087116, 0.0, 0.06773, 0.0, 0.17970388247374283, 0.0],
+    "L2 halo, large": [1.0274662443315938, 0.0, 0.07349, 0.0, 0.4470848771261125, 0.0],
+    "NRHO 9:2": [0.9873801492146178, 0.0, 0.008439917431935787, 0.0, 1.66728339697783, 0.0],
+    "DRO": [1.17539, 0.0, 0.0, 0.0, -0.49424426634269614, 0.0],
+}
+ORBIT_ARC, ORBIT_NOISE, ORBIT_SEEDS = "8 days, 5 obs", 10.0, range(20)
 CONVERGED_KM, GATE_SIGMA = 10.0, 3.0
 
-FIELDS = ["arc", "noise_arcsec", "seed", "method", "iod_ok", "iod_error", "iod_s", "iod_position_error_km",
+FIELDS = ["orbit", "arc", "noise_arcsec", "seed", "method", "iod_used", "attempts", "iod_ok", "iod_error", "iod_s", "iod_position_error_km",
           "iod_velocity_error_m_s", "bls_ok", "bls_error", "bls_s", "bls_iterations", "rms_sigma",
-          "final_position_error_km", "r_x", "r_y", "r_z", "collocation_objective", "collocation_guess"]
+          "final_position_error_km", "r_x", "r_y", "r_z", "collocation_objective", "collocation_guess", "total_s",
+          "sigma_position_km", "alternatives", "nearest_alternative_km"]
 
 
-def config_for(arc: str, noise: float, seed: int, method: str) -> dict:
-    """The bundled scenario with this case's schedule, noise, seed and IOD method."""
+def config_for(arc: str, noise: float, seed: int, method: str, orbit: str | None = None) -> dict:
+    """The bundled scenario with this case's orbit, schedule, noise, seed and IOD method."""
     import yaml
 
     with open(SCENARIO, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     times, epoch_index = ARCS[arc]
     cfg["run"]["seed"] = int(seed)
+    if orbit:
+        cfg["simulation"]["truth"]["initial_state"]["values"] = list(ORBITS[orbit])
     cfg["simulation"]["observations"]["times_days"] = list(times)
     cfg["simulation"]["observations"]["noise"]["sigma_arcsec"] = float(noise)
     iod = cfg["determination"]["iod"]
-    iod["epoch_index"] = epoch_index
-    if method == "collocation":
-        iod["method"] = "collocation"                 # options as in the bundled scenario
+    iod["epoch_index"], iod["options"] = epoch_index, {}          # each method's default options
+    if method in PRODUCTS:
+        iod["method"], iod["fallback"] = PRODUCTS[method]
     else:
-        iod["method"], iod["options"] = ("range_search" if method == REFERENCE else method), {}
+        iod["method"], iod["fallback"] = ("range_search" if method == REFERENCE else method), []
+        if method in ("gooding", "gauss", "laplace"):    # first, epoch and last observation: fit at the same epoch
+            iod["options"] = {"obs_indices": [0, epoch_index, len(times) - 1]}
     cfg["output"] = {"directory": str(ROOT / "outputs" / "benchmarks" / "_scratch"), "plots": False,
                      "observations": False}
     return cfg
+
+
+def _sigma_km(x) -> float | None:
+    """1-sigma position uncertainty the fit reports (root of the covariance trace), or None if it has none."""
+    return None if x.cov is None else float(np.sqrt(np.trace(np.asarray(x.cov)[:3, :3])) / 1e3)
+
+
+def _alternatives(info: dict, truth_r) -> dict:
+    """How many other orbits range search found that fit as well, and the nearest one's distance to the truth."""
+    alts = (info or {}).get("alternatives")
+    if alts is None:
+        return {}
+    d = [float(np.linalg.norm(np.array(a["position_m"]) - truth_r) / 1e3) for a in alts]
+    return {"alternatives": len(alts), "nearest_alternative_km": min(d) if d else None}
 
 
 def run_case(job: dict) -> dict:
@@ -76,19 +109,40 @@ def run_case(job: dict) -> dict:
     from od_stack.estimation import EstimationFailure
     from od_stack.frames import EarthMoonSystem
     from od_stack.iod import IODFailure
-    from od_stack.run import build_stages, validate_observations
+    from od_stack.run import build_stages, size_collocation_mesh, validate_observations
     from od_stack.sources import select_observations
     from od_stack.synthetic import generate
 
-    row = {k: job[k] for k in ("arc", "noise_arcsec", "seed", "method")}
-    cfg = prepare(config_for(job["arc"], job["noise_arcsec"], job["seed"], job["method"]))
+    from od_stack.run import determine
+
+    row = {k: job.get(k) for k in ("orbit", "arc", "noise_arcsec", "seed", "method")}
+    cfg = prepare(config_for(job["arc"], job["noise_arcsec"], job["seed"], job["method"], job.get("orbit")))
     sys_ = EarthMoonSystem(**cfg["system"])
     obs, truth = generate(cfg["simulation"], sys_)
     obs = select_observations(obs, cfg)
     validate_observations(obs, cfg)
+    size_collocation_mesh(cfg, obs)                  # as run() does
     iod, estimator, _ = build_stages(cfg, sys_)
     t_epoch = float(obs.t[cfg["iod"]["epoch_index"]])
     tru = truth.at(np.array([t_epoch]))
+
+    if job["method"] in PRODUCTS:                    # the whole determination step, fallback included
+        t0 = time.perf_counter()
+        try:
+            x_iod, x0, used, attempts = determine(cfg, sys_, obs, iod, estimator)
+        except EstimationFailure as e:
+            # "IOD ran" if any method produced a state, even if its fit was then rejected
+            ran = "(estimation)" in str(e)
+            row.update(iod_ok=ran, bls_ok=False, bls_error=str(e)[:200], total_s=time.perf_counter() - t0)
+            return row
+        tx, tf = truth.at(np.array([x_iod.t])), truth.at(np.array([x0.t]))
+        row.update(iod_ok=True, bls_ok=True, iod_used=used.name, attempts=len(attempts), total_s=time.perf_counter() - t0,
+                   iod_position_error_km=float(np.linalg.norm(x_iod.r - tx.r[0]) / 1e3),
+                   iod_velocity_error_m_s=float(np.linalg.norm(x_iod.v - tx.v[0])),
+                   bls_iterations=x0.info.get("iterations"), rms_sigma=x0.info.get("rms_normalized_residual"),
+                   final_position_error_km=float(np.linalg.norm(x0.r - tf.r[0]) / 1e3), sigma_position_km=_sigma_km(x0),
+                   r_x=float(x0.r[0]), r_y=float(x0.r[1]), r_z=float(x0.r[2]), **_alternatives(x0.info, tf.r[0]))
+        return row
 
     t0 = time.perf_counter()
     try:
@@ -107,9 +161,11 @@ def run_case(job: dict) -> dict:
     diag = (x_iod.info or {}).get("collocation") or {}
     row["collocation_objective"] = diag.get("objective")
     row["collocation_guess"] = diag.get("initial_guess")      # the start that produced the chosen solution
+    row.update(_alternatives(x_iod.info, tx.r[0]))
 
     t0 = time.perf_counter()
     try:
+        estimator.gate = None              # single methods: grade the raw fit; the check is applied in grade()
         x0 = estimator.refine(obs, x_iod)
         row["bls_ok"] = True
     except (EstimationFailure, RuntimeError) as e:
@@ -118,7 +174,7 @@ def run_case(job: dict) -> dict:
     row["bls_s"] = time.perf_counter() - t0
     tf = truth.at(np.array([x0.t]))
     row.update(bls_iterations=x0.info.get("iterations"), rms_sigma=x0.info.get("rms_normalized_residual"),
-               final_position_error_km=float(np.linalg.norm(x0.r - tf.r[0]) / 1e3),
+               final_position_error_km=float(np.linalg.norm(x0.r - tf.r[0]) / 1e3), sigma_position_km=_sigma_km(x0),
                r_x=float(x0.r[0]), r_y=float(x0.r[1]), r_z=float(x0.r[2]))
     return row
 
@@ -127,26 +183,30 @@ def _safe(job):
     try:
         return run_case(job)
     except Exception as e:                       # one broken case must not stop the benchmark
-        return {**{k: job[k] for k in ("arc", "noise_arcsec", "seed", "method")}, "iod_ok": False,
+        return {**{k: job.get(k) for k in ("orbit", "arc", "noise_arcsec", "seed", "method")}, "iod_ok": False,
                 "iod_error": f"{type(e).__name__}: {e}"[:200]}
 
 
-def jobs_for(quick: bool) -> list[dict]:
+def jobs_for(quick: bool, study: str = "arcs", methods=None) -> list[dict]:
+    if study == "orbits":
+        ms = methods or ("collocation", "range_search", *PRODUCTS)
+        return [{"orbit": o, "arc": ORBIT_ARC, "noise_arcsec": ORBIT_NOISE, "seed": s, "method": m}
+                for o in ORBITS for s in (range(1) if quick else ORBIT_SEEDS) for m in (REFERENCE, *ms)]
     arcs, noises, seeds = (ARCS, (10.0,), range(1)) if quick else (ARCS, NOISE_ARCSEC, SEEDS)
-    return [{"arc": a, "noise_arcsec": n, "seed": s, "method": m}
-            for a in arcs for n in noises for s in seeds for m in (REFERENCE, *METHODS)]
+    return [{"orbit": None, "arc": a, "noise_arcsec": n, "seed": s, "method": m}
+            for a in arcs for n in noises for s in seeds for m in (REFERENCE, *(methods or (*METHODS, *PRODUCTS)))]
 
 
-def run_all(out: Path, workers: int, quick: bool) -> list[dict]:
+def run_all(out: Path, workers: int, quick: bool, study: str = "arcs", methods=None) -> list[dict]:
     out.mkdir(parents=True, exist_ok=True)
     path = out / "runs.csv"
-    key = lambda r: (r["arc"], float(r["noise_arcsec"]), int(r["seed"]), r["method"])
+    key = lambda r: (r.get("orbit") or "", r["arc"], float(r["noise_arcsec"]), int(r["seed"]), r["method"])
     done = []
     if path.exists():
         with open(path, newline="") as f:
             done = list(csv.DictReader(f))
     have = {key(r) for r in done}
-    todo = [j for j in jobs_for(quick) if key(j) not in have]
+    todo = [j for j in jobs_for(quick, study, methods) if key(j) not in have]
     print(f"{len(todo)} runs to do ({len(have)} already in {path}), {workers} workers")
     new = not path.exists()
     with open(path, "a", newline="") as f, mp.get_context("spawn").Pool(workers) as pool:
@@ -174,9 +234,10 @@ def _f(v):
 
 def grade(rows: list[dict]) -> list[dict]:
     """Mark each run converged if its BLS fit matches the truth-started fit of the same case."""
-    ref = {(r["arc"], _f(r["noise_arcsec"]), int(r["seed"])): r for r in rows if r["method"] == REFERENCE}
+    case = lambda r: (r.get("orbit") or "", r["arc"], _f(r["noise_arcsec"]), int(r["seed"]))
+    ref = {case(r): r for r in rows if r["method"] == REFERENCE}
     for r in rows:
-        f = ref.get((r["arc"], _f(r["noise_arcsec"]), int(r["seed"])))
+        f = ref.get(case(r))
         r["converged"] = False
         if r.get("bls_ok") == "True" and f is not None and f.get("bls_ok") == "True":
             d = np.linalg.norm([_f(r[c]) - _f(f[c]) for c in ("r_x", "r_y", "r_z")]) / 1e3
@@ -187,35 +248,42 @@ def grade(rows: list[dict]) -> list[dict]:
 
 def summarize(rows: list[dict]) -> list[dict]:
     out = []
-    for arc in ARCS:
+    groups = ([(o, a) for o in ORBITS for a in ARCS] if any(r.get("orbit") for r in rows) else [("", a) for a in ARCS])
+    for orbit, arc in groups:
         for noise in sorted({_f(r["noise_arcsec"]) for r in rows}):
-            for m in (*METHODS, REFERENCE):
-                g = [r for r in rows if r["arc"] == arc and _f(r["noise_arcsec"]) == noise and r["method"] == m]
+            for m in (*METHODS, *PRODUCTS, REFERENCE):
+                g = [r for r in rows if (r.get("orbit") or "") == orbit and r["arc"] == arc
+                     and _f(r["noise_arcsec"]) == noise and r["method"] == m]
                 if not g:
                     continue
                 ok = [r for r in g if r.get("iod_ok") == "True"]
                 conv = [r for r in g if r["converged"]]
                 med = lambda key, rs: float(np.nanmedian([_f(r[key]) for r in rs])) if rs else np.nan
-                out.append({"arc": arc, "noise_arcsec": noise, "method": m, "runs": len(g), "iod_ok": len(ok),
+                used = sorted({r.get("iod_used") for r in g if r.get("iod_used")})
+                out.append({"orbit": orbit, "arc": arc, "noise_arcsec": noise, "method": m, "runs": len(g),
+                            "iod_ok": len(ok), "fell_back": sum(r.get("iod_used") not in (None, "", PRODUCTS[m][0])
+                                                                for r in g if r.get("bls_ok") == "True")
+                            if m in PRODUCTS else "", "iod_used": ", ".join(used),
                             "iod_error_km": med("iod_position_error_km", ok),
                             "iod_error_p90_km": float(np.nanpercentile([_f(r["iod_position_error_km"]) for r in ok], 90))
                             if ok else np.nan,
                             "within_10000_km": sum(_f(r["iod_position_error_km"]) <= 10_000 for r in ok),
                             "converged": len(conv), "bls_iterations": med("bls_iterations", conv),
-                            "iod_s": med("iod_s", ok), "final_error_km": med("final_position_error_km", conv)})
+                            "iod_s": med("total_s" if m in PRODUCTS else "iod_s", g),
+                            "final_error_km": med("final_position_error_km", conv)})
     return out
 
 
 def markdown(summary: list[dict]) -> str:
-    lines = ["| Arc | Noise (″) | Method | IOD ran | Median IOD error (km) | 90th pct (km) | Within 10,000 km "
-             "| BLS converged | Median BLS iterations | Median IOD time (s) |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+    lines = ["| Orbit | Arc | Noise (″) | Method | IOD ran | Median IOD error (km) | 90th pct (km) | Within 10,000 km "
+             "| BLS converged | Used the fallback | Median BLS iterations | Median IOD time (s)* |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for s in summary:
         fmt = lambda v, p=0: "—" if not np.isfinite(v) else f"{v:,.{p}f}"
-        lines.append(f"| {s['arc']} | {s['noise_arcsec']:g} | {s['method']} | {s['iod_ok']}/{s['runs']} | "
+        lines.append(f"| {s['orbit'] or 'baseline'} | {s['arc']} | {s['noise_arcsec']:g} | {s['method']} | {s['iod_ok']}/{s['runs']} | "
                      f"{fmt(s['iod_error_km'], 1)} | {fmt(s['iod_error_p90_km'])} | {s['within_10000_km']} | "
-                     f"{s['converged']}/{s['runs']} | {fmt(s['bls_iterations'])} | {fmt(s['iod_s'], 1)} |")
-    return "\n".join(lines) + "\n"
+                     f"{s['converged']}/{s['runs']} | {s['fell_back']} | {fmt(s['bls_iterations'])} | {fmt(s['iod_s'], 1)} |")
+    return "\n".join(lines) + "\n\n*For the product rows: IOD and least squares together, fallbacks included.\n"
 
 
 def plot(rows: list[dict], summary: list[dict], out: Path) -> list[str]:
@@ -260,17 +328,21 @@ def plot(rows: list[dict], summary: list[dict], out: Path) -> list[str]:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--out", default=str(ROOT / "outputs" / "benchmarks" / "collocation_iod"))
+    ap.add_argument("--out", help="output folder (default: outputs/benchmarks/collocation_iod[_orbits])")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--study", choices=["arcs", "orbits"], default="arcs",
+                    help="arcs: 4 arcs x 3 noise levels x 10 draws (baseline halo); orbits: 5 orbits x 20 draws at 10\"")
+    ap.add_argument("--methods", nargs="+", help="subset of methods (the truth-started reference always runs)")
     a = ap.parse_args(argv)
-    out = Path(a.out)
-    rows = grade(run_all(out, a.workers, a.quick))
+    out = Path(a.out or ROOT / "outputs" / "benchmarks" / ("collocation_iod" + ("_orbits" if a.study == "orbits" else "")))
+    rows = grade(run_all(out, a.workers, a.quick, a.study, a.methods))
     summ = summarize(rows)
     text = markdown(summ)
     (out / "summary.md").write_text(text, encoding="utf-8")
     print(text)
-    print("Figures:", *plot(rows, summ, out), sep="\n  ")
+    if a.study == "arcs":
+        print("Figures:", *plot(rows, summ, out), sep="\n  ")
     return 0
 
 

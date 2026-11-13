@@ -178,16 +178,28 @@ def _check_epoch(k: int, obs: Observations) -> int:
 
 class RangeSearch:
     """CR3BP range search: angles give the direction, so try a grid of distances (range) and
-    radial speeds (range-rate) at the epoch, propagate each candidate in the CR3BP, and keep
-    the one whose predicted angles best match ALL observations. Coarse on its own (~tens of
-    thousands of km), but close enough for Batch Least Squares to finish the job."""
+    radial speeds (range-rate) at the epoch, propagate each candidate in the CR3BP, and score
+    how well its predicted angles match ALL observations. The grid alone is coarse (~tens of
+    thousands of km, mostly because the sideways velocity comes from a rough estimate of how
+    fast the line of sight turns), so by default the best few distinct grid points are then
+    polished: a least-squares fit of all six state components to the angles, in the same
+    CR3BP, from each start. The polished candidate with the smallest angle misfit wins. Polishing
+    continues past `candidates` starts (up to `max_candidates`) until one fits the angles at the
+    residual-check level (RMS <= 3 sigma): on a DRO the right valley was sometimes only the 5th-best
+    grid point on the coarse grid (benchmarks/collocation_iod/RESULTS.md)."""
+
+    ACCEPT_RMS_SIGMA = 3.0
+    DISTINCT_KM = 1000.0          # polished solutions farther apart than this are different orbits
 
     name = "range_search"
     config_block = "range_search"
 
-    def __init__(self, sys: EarthMoonSystem, epoch_index: int = 2, range_km=(150000, 650000, 10000),
-                 range_rate_m_s=(-800, 800, 50), **_):
+    def __init__(self, sys: EarthMoonSystem, epoch_index: int = 2, range_km=(150000, 650000, 20000),
+                 range_rate_m_s=(-800, 800, 100), refine: bool = True, candidates: int = 12,
+                 max_candidates: int = 20, **_):
         self.sys, self.k = sys, int(epoch_index)
+        self.refine, self.n_candidates = bool(refine), int(candidates)
+        self.max_candidates = max(int(max_candidates), self.n_candidates)
         self.ranges = np.arange(range_km[0], range_km[1] + 0.5 * range_km[2], range_km[2]) * 1e3
         self.rates = np.arange(range_rate_m_s[0], range_rate_m_s[1] + 0.5 * range_rate_m_s[2], range_rate_m_s[2])
 
@@ -224,23 +236,127 @@ class RangeSearch:
                 cost += float(ang / obs.sigma[i]) ** 2
         return cost
 
+    def _starts(self, costs: np.ndarray) -> list[tuple[int, int]]:
+        """Grid points to polish: the best, then the next best that are not next to an earlier pick
+        (each one is a different valley of the cost, not the same valley twice)."""
+        picks = []
+        for flat in np.argsort(costs, axis=None):
+            i, j = np.unravel_index(flat, costs.shape)
+            if not np.isfinite(costs[i, j]) or len(picks) == self.max_candidates:
+                break
+            if all(abs(i - a) > 2 or abs(j - b) > 2 for a, b in picks):
+                picks.append((int(i), int(j)))
+        return picks
+
+    def _polish(self, x_rot: np.ndarray, obs: Observations, k: int):
+        """Least-squares fit of the 6 rotating-frame state components at the epoch to all the angles, with the
+        exact Jacobian from the state transition matrix. Returns (state, cost) or None if it fails."""
+        from scipy.optimize import least_squares
+
+        from .dynamics import propagate_cr3bp_stm
+        from .frames import rot_z
+
+        taus = self.sys.tau(obs.t)
+        R = np.array([rot_z(t) for t in taus]) * self.sys.du_m
+        sigma = np.maximum(obs.sigma, 1e-12)
+        # two directions perpendicular to each measured line of sight
+        e1 = np.cross(obs.los, [0.0, 0.0, 1.0])
+        e1[np.linalg.norm(e1, axis=1) < 1e-8] = [1.0, 0.0, 0.0]
+        e1 /= np.linalg.norm(e1, axis=1)[:, None]
+        e2 = np.cross(obs.los, e1)
+        E = np.stack([e1, e2], axis=1)                      # (N, 2, 3)
+        cache = {}
+
+        def model(x):
+            key = x.tobytes()
+            if key not in cache:
+                states, stms = propagate_cr3bp_stm(x, taus[k], taus, self.sys.mu)
+                d = np.einsum("nij,nj->ni", R, states[:, :3] - self.sys.earth_rot) - obs.observer
+                n = np.linalg.norm(d, axis=1)
+                u = d / n[:, None]
+                res = (np.einsum("nij,nj->ni", E, u) / sigma[:, None]).ravel()
+                P = (np.eye(3)[None] - np.einsum("ni,nj->nij", u, u)) / n[:, None, None]
+                jac = np.einsum("nij,njk,nkl,nlm->nim", E, P, R, stms[:, :3, :]) / sigma[:, None, None]
+                cache.clear()
+                cache[key] = (res, jac.reshape(-1, 6), np.all(np.einsum("ni,ni->n", u, obs.los) > 0))
+            return cache[key]
+
+        try:
+            with np.errstate(over="ignore", invalid="ignore"):    # wild starts may blow up; they are dropped
+                sol = least_squares(lambda x: model(x)[0], x_rot, jac=lambda x: model(x)[1], method="lm",
+                                    x_scale="jac", max_nfev=40)   # good starts need <15; wild ones crawl
+                ok = model(sol.x)[2]                        # every prediction on the measured side of the sky
+        except (RuntimeError, ValueError, FloatingPointError):
+            return None
+        if not ok or not np.isfinite(sol.x).all():
+            return None
+        return sol.x, float(2 * sol.cost)
+
+    def _alternatives(self, polished, r_best, tau, accept, n_obs) -> list[dict]:
+        """Other, clearly different orbits that also fit the angles at the residual-check level. On 1-day arcs
+        there were often two, about 11,000 km apart, and the true one was sometimes the second best: the data
+        cannot tell them apart, so the caller should know."""
+        from .frames import rotating_to_emi
+
+        out, seen = [], [r_best]
+        for x, c in sorted(polished, key=lambda p: p[1]):
+            r, v = rotating_to_emi(tau, x, self.sys)
+            rng = np.linalg.norm(r - self._observer)
+            if (c > accept or not self.ranges[0] <= rng <= self.ranges[-1]          # outside the searched distances
+                    or any(np.linalg.norm(r - q) <= self.DISTINCT_KM * 1e3 for q in seen)):
+                continue
+            seen.append(r)
+            out.append({"position_m": r.tolist(), "velocity_m_s": v.tolist(),
+                        "rms_sigma": float(np.sqrt(c / (2 * n_obs))),
+                        "distance_from_chosen_km": float(np.linalg.norm(r - r_best) / 1e3)})
+        return out
+
     def estimate(self, obs: Observations) -> StateEstimate:
+        from .frames import emi_to_rotating, rotating_to_emi
+
         k = _check_epoch(self.k, obs)
         if len(obs) < 3:
             raise IODFailure("range_search needs at least 3 observations")
+        self._observer = obs.observer[k]
         L, Ld = obs.los[k], self._direction_rate(obs, k)
-        best = (np.inf, None, None)
-        for rho in self.ranges:
-            for rhod in self.rates:
-                r, v = obs.observer[k] + rho * L, rhod * L + rho * Ld
-                c = self._cost(r, v, obs, k)
-                if c < best[0]:
-                    best = (c, r, v)
-        if best[1] is None:
+        costs = np.full((len(self.ranges), len(self.rates)), np.inf)
+        for i, rho in enumerate(self.ranges):
+            for j, rhod in enumerate(self.rates):
+                try:
+                    costs[i, j] = self._cost(obs.observer[k] + rho * L, rhod * L + rho * Ld, obs, k)
+                except (RuntimeError, ValueError, FloatingPointError):
+                    pass
+        starts = self._starts(costs)
+        if not starts:
             raise IODFailure("range_search: no candidate could be evaluated")
-        return StateEstimate(t=float(obs.t[k]), r=best[1], v=best[2], method=self.name,
-                             info={"obs_indices": [k], "grid_points": int(len(self.ranges) * len(self.rates)),
-                                   "best_range_km": float(np.linalg.norm(best[1] - obs.observer[k]) / 1e3)})
+        i, j = starts[0]
+        r, v = obs.observer[k] + self.ranges[i] * L, self.rates[j] * L + self.ranges[i] * Ld
+        info = {"obs_indices": [k], "grid_points": int(costs.size),
+                "grid_best_range_km": float(self.ranges[i] / 1e3), "grid_best_cost": float(costs[i, j]),
+                "polished": False}
+        if self.refine:
+            tau = float(self.sys.tau(obs.t[k]))
+            polished, accept = [], self.ACCEPT_RMS_SIGMA ** 2 * 2 * len(obs)      # cost = sum of squares, 2 per obs
+            tried = 0
+            for i, j in starts:
+                if tried >= self.n_candidates and any(c <= accept for _, c in polished):
+                    break
+                tried += 1
+                start = emi_to_rotating(tau, obs.observer[k] + self.ranges[i] * L,
+                                        self.rates[j] * L + self.ranges[i] * Ld, self.sys)
+                p = self._polish(start, obs, k)
+                if p is not None:
+                    polished.append(p)
+            info["polish_costs"] = sorted(c for _, c in polished)
+            info["polished_starts"] = tried
+            if polished:
+                x_best, c_best = min(polished, key=lambda p: p[1])
+                if c_best < info["grid_best_cost"]:
+                    r, v = rotating_to_emi(tau, x_best, self.sys)
+                    info.update(polished=True, polished_cost=c_best,
+                                alternatives=self._alternatives(polished, r, tau, accept, len(obs)))
+        info["best_range_km"] = float(np.linalg.norm(r - obs.observer[k]) / 1e3)
+        return StateEstimate(t=float(obs.t[k]), r=r, v=v, method=self.name, info=info)
 
 
 IOD_METHODS = {

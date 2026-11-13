@@ -121,15 +121,65 @@ determination:
     method: range_search
     epoch_index: 2
     options:
-      range_km: [150000, 650000, 10000]
-      range_rate_m_s: [-800, 800, 50]
+      range_km: [150000, 650000, 20000]
+      range_rate_m_s: [-800, 800, 100]
+      refine: true          # polish the best grid points (default)
+      candidates: 12        # how many distinct grid valleys to polish
+      max_candidates: 20    # keep going until one fits at the 3-sigma level
 ```
+
+Range search scores a grid of distances and radial speeds at the epoch, then polishes the best
+grid points from 12 different valleys of the cost: a least-squares fit of all six state components
+to the angles, in the same CR3BP, with the exact Jacobian. The polished fit with the smallest misfit
+is the IOD state. If another, clearly different orbit (more than 1,000 km away, within the searched
+distances) also fits the angles at the 3σ level, it is listed in `info.alternatives` and the
+summary carries a warning: on 1-day arcs this happened on most noise draws, and the true orbit was
+sometimes the runner-up. `refine: false` returns the raw grid point (tens of thousands of km off).
 
 Two-body `gooding`, `gauss`, and `laplace` are available for appropriate cases;
 they are not reliable choices for the baseline halo. `truth_plus_error` is kept
 only in the legacy test interface. Collocation options correspond to `SolverOptions`.
 Estimator options include `optimizer`, iteration/evaluation limits,
-`convergence_threshold`, and `covariance`.
+`convergence_threshold`, `covariance`, and `residual_gate_sigma`.
+
+### Residual check and IOD fallback
+
+`determination.estimator.options.residual_gate_sigma` (default 3 in YAML configs; off in the
+legacy stage configs used by older scripts) rejects a batch least-squares fit whose residual RMS,
+in measurement standard deviations, exceeds that value. Correct fits stayed at or below 1.6 at
+1–100″ noise; wrong local solutions were at hundreds
+([benchmarks](../benchmarks/collocation_iod/IMPROVEMENTS.md)). Set it to `null` to turn the check off.
+
+Synthetic angles include light time (`simulation.observations.light_time`, default `true`): each
+line of sight points to where the object was when the light left it, as Orekit's measurement model
+assumes. That shifts the angles by about 0.6–0.8″ on the halo. With `light_time: false` (the
+original generator) the angles disagree with Orekit's by that much, which at 0.1″ noise pushes a
+correct fit to ~2σ and its error from 0.23 to 0.89 km.
+
+`determination.iod.fallback` (default `[range_search]`) lists IOD methods to try, in order, when the
+selected IOD fails or the estimator rejects its fit. The first fit that passes is used. The summary
+records every attempt under `attempts`, and `iod` names the method that produced the result. If none
+passes, the run stops with an error listing each attempt. Use `fallback: []` to run one method only.
+
+Any error inside an IOD method or the estimator (including one raised by Java) counts as that
+method failing and moves on to the next; only configuration errors stop the run. A fallback may not
+repeat the primary method.
+
+Collocation's `impulsive` and `hybrid` modes estimate burns, which `orekit_bls` cannot represent; that
+combination is rejected before computation (use `estimator: method: none` to keep the collocation
+trajectory). Collocation also needs about 10 mesh nodes per day of observation arc (minimum 20).
+Once the observation times are known, a lower `nodes` (or the default 80, when collocation is a
+fallback on a longer arc) is raised to that, and `summary.json` says so under `notes`.
+
+`summary.json` also carries `warnings`, in plain language, when the result should not be taken at
+face value: an arc shorter than 2 days from Earth's center, another orbit that fits the angles
+about as well, or a covariance that could not be computed. The covariance is computed with a
+singularity threshold of 1e-16; on 1-day arcs its 1σ then matched the actual errors of fits in the
+right valley (error/σ 0.5–1.0).
+
+Every `summary.json` records `provenance`: Python, package versions, machine and OS. Collocation's
+optimizer can settle on slightly different solutions on different platforms, so compare runs made
+with the same container image.
 
 ## Output contract
 

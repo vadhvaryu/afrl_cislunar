@@ -26,7 +26,7 @@ running Docker. The launcher needs only standard-library Python on the host.
 For direct Docker usage, build from the repository root:
 
 ```text
-docker build -f containers/Dockerfile -t cislunar-stack:local .
+docker build -f containers/Dockerfile --build-arg IMAGE_TAG=cislunar-stack:local -t cislunar-stack:local .
 ```
 
 Then mount a config, data directory, and output directory as above. Running the
@@ -34,8 +34,20 @@ image without a mounted configuration fails rather than running a hidden default
 scenario. The build itself uses `containers/smoke.yaml` to check the full chain.
 
 See [the complete configuration and bind-mount guide](../docs/configuration.md).
-Docker is unavailable in this workspace, so actual image build/runtime validation
-remains pending.
+
+**Pinned inputs.** The Python base image and the Java 21 runtime (Eclipse Temurin) are pinned by
+digest in the Dockerfile, and every Python package by exact version in `requirements.lock`; bump
+the image tag whenever one of them changes. Each run's `summary.json` records the image tag
+(`CISLUNAR_IMAGE`), Python, package versions and machine. Only `libgomp1` still comes from
+Debian's package archive at build time.
+
+**Networks that re-sign TLS** (common on corporate and government networks): pass the network's CA
+bundle as a build secret; it is used for the package install only and is not stored in the image:
+`docker build --secret id=pip_cert,src=/path/to/ca.pem -f containers/Dockerfile -t cislunar-stack:local .`
+
+**Validated (November 2026, x86, Docker 29):** the image builds, its smoke run passes, and
+`scripts/run_container.py` on `scenarios/plug_and_play/config.yaml` gives the same numbers as a
+native run (IOD 18.3 km, final 15.1 km).
 
 ## Optional research image
 
