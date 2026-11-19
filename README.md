@@ -5,7 +5,8 @@ orbit paths from synthetic sensor data.
 
 The repository contains a working CR3BP batch orbit-determination prototype and
 an independently packaged collocation IOD solver. Sequential updating and broader
-product validation remain unfinished; see [project status](docs/project_status.md).
+product validation remain unfinished; see [project status](docs/project_status.md) and the
+[November handoff](docs/handoff.md) (current state, open pull requests, decisions and next steps).
 
 ## Repository layout
 
