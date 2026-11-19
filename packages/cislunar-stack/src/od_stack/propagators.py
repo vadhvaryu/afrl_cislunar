@@ -13,7 +13,7 @@ from typing import Protocol
 import numpy as np
 
 from .contracts import StateEstimate, Trajectory
-from .dynamics import propagate_cr3bp
+from .dynamics import propagate_cr3bp, propagate_with_burns
 from .frames import EarthMoonSystem, emi_to_rotating, rotating_to_emi
 from .orekit_setup import start_orekit
 
@@ -22,6 +22,16 @@ class Propagator(Protocol):
     name: str
 
     def propagate(self, x0: StateEstimate, t: np.ndarray) -> Trajectory: ...
+
+
+def burns_of(x0: StateEstimate, sys: EarthMoonSystem) -> list:
+    """Fitted impulsive burns carried by a state (cr3bp_bls), as (rotating time, rotating velocity change)."""
+    from .frames import rot_z
+    out = []
+    for m in (x0.info or {}).get("maneuvers") or []:
+        tau = float(sys.tau(m["t_s"]))
+        out.append((tau, rot_z(tau).T @ np.asarray(m["delta_v_m_s"], dtype=float) / sys.vu_ms))
+    return out
 
 
 class CR3BPPropagator:
@@ -36,7 +46,9 @@ class CR3BPPropagator:
         tau0 = float(self.sys.tau(x0.t))
         x_rot0 = emi_to_rotating(tau0, x0.r, x0.v, self.sys)
         taus = self.sys.tau(t)
-        x_rot = propagate_cr3bp(x_rot0, tau0, taus, self.sys.mu)
+        burns = burns_of(x0, self.sys)
+        x_rot = (propagate_with_burns(x_rot0, tau0, taus, self.sys.mu, burns) if burns
+                 else propagate_cr3bp(x_rot0, tau0, taus, self.sys.mu))
         rv = [rotating_to_emi(tau, x, self.sys) for tau, x in zip(taus, x_rot)]
         return Trajectory(t=np.asarray(t, float), r=np.array([a for a, _ in rv]),
                           v=np.array([b for _, b in rv]), label=f"{x0.method} + cr3bp")
@@ -84,6 +96,8 @@ class OrekitCR3BPPropagator:
         start_orekit(orekit_data)
 
     def propagate(self, x0: StateEstimate, t: np.ndarray) -> Trajectory:
+        if burns_of(x0, self.sys):
+            raise RuntimeError("orekit_cr3bp prediction does not apply fitted burns; use the scipy CR3BP prediction")
         from .orekit_models import frame_and_epoch, propagator_builder
 
         frame, t0 = frame_and_epoch()

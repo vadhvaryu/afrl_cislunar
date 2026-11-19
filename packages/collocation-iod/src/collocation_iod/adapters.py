@@ -122,10 +122,17 @@ class CollocationIOD:
         except (ValueError, RuntimeError) as exc:
             raise IODFailure(f"collocation: {exc}") from exc
         self.last_result = result
+        impulses = []
+        if self.options.mode in ("impulsive", "hybrid"):
+            vu = self.system.du_m / self.system.tu_s
+            for tau, dv in zip(result.t[1:], result.impulses):
+                dv_emi = _rotation(np.array([tau]))[0] @ dv * vu      # velocity jumps rotate like vectors
+                if np.linalg.norm(dv_emi) > 1e-3:                      # m/s; below this is numerical noise
+                    impulses.append({"t_s": float(tau * self.system.tu_s), "delta_v_m_s": dv_emi.tolist()})
         return StateEstimate(
             t=t, r=r, v=v, cov=None, method=self.name,
             info={"collocation": result.diagnostics.copy(), "obs_indices": list(range(len(obs.t))),
-                  "maneuver_model": self.options.mode,
+                  "maneuver_model": self.options.mode, "impulses": impulses,
                   "control_history_available_on_adapter": True},
         )
 

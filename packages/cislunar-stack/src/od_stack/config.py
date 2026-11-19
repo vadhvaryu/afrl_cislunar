@@ -58,6 +58,10 @@ DEFAULTS: dict = {
         "covariance": True,
         "residual_gate_sigma": None,  # reject a fit whose residual RMS exceeds this many sigmas; null = off.
                                       # Off here (legacy configs, tests); the YAML product turns it on at 3.
+        # cr3bp_bls only: fit the burns the IOD reports (collocation mode impulsive), or none
+        "maneuvers": "from_iod",
+        "estimate_burn_times": True,  # also fit each burn's time (else keep the IOD's)
+        "min_burn_m_s": 0.5,          # ignore IOD burns smaller than this
     },
     "propagator": {"method": "orekit_cr3bp"},
     "prediction": {"start_days": None, "end_days": None, "points": 800},
@@ -224,12 +228,27 @@ def prepare(user_cfg: dict) -> dict:
             problems.append("iod.fallback lists a method twice")
         if cfg["iod"]["method"] in fallback:
             problems.append("iod.fallback repeats iod.method; list only the other methods to try")
+    e = cfg["estimation"]
+    if e.get("maneuvers", "from_iod") not in ("from_iod", "none"):
+        problems.append("estimation.maneuvers must be from_iod or none")
+    if type(e.get("estimate_burn_times", True)) is not bool:
+        problems.append("estimation.estimate_burn_times must be true or false")
+    if not (finite_number(e.get("min_burn_m_s", 0.5)) and e.get("min_burn_m_s", 0.5) > 0):
+        problems.append("estimation.min_burn_m_s must be a positive number")
     uses_collocation = cfg["iod"]["method"] == "collocation" or "collocation" in (fallback or [])
     mode = (cfg["iod"].get("collocation") or {}).get("mode", "continuous")
-    if uses_collocation and mode in ("impulsive", "hybrid") and cfg["estimation"]["method"] == "orekit_bls":
+    burns_kept = e["method"] == "cr3bp_bls" and e.get("maneuvers", "from_iod") == "from_iod"
+    if uses_collocation and mode in ("impulsive", "hybrid") and e["method"] == "orekit_bls":
         problems.append(f"collocation mode '{mode}' estimates burns, but orekit_bls assumes the spacecraft coasts and "
-                        "would discard them; use estimation method none to keep collocation's trajectory, "
-                        "or mode continuous")
+                        "would discard them; use estimation method cr3bp_bls (fits the burns), none (keeps "
+                        "collocation's trajectory), or mode continuous")
+    if uses_collocation and mode == "hybrid" and e["method"] == "cr3bp_bls":
+        problems.append("collocation mode 'hybrid' estimates continuous thrust, which cr3bp_bls cannot fit; "
+                        "use mode impulsive")
+    burns_kept = burns_kept or e["method"] == "none"           # none keeps the IOD's own burns
+    if uses_collocation and mode in ("impulsive", "hybrid") and burns_kept and cfg["propagator"]["method"] != "cr3bp":
+        problems.append("the fitted burns are applied only by the scipy CR3BP prediction; set prediction backend "
+                        "scipy (propagator cr3bp)")
 
     if problems:
         raise ConfigError("config.yaml has problems:\n  - " + "\n  - ".join(problems))
