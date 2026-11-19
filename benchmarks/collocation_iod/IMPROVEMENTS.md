@@ -93,6 +93,22 @@ Run time per case (IOD plus least squares, 4 runs in parallel on 4 cores):
 - Collocation first: 2–8 s when collocation succeeds, 17–35 s when it has to fall back.
 - The old grid-only range search took 12–17 s on its own.
 
+### Follow-up: the two-orbit check no longer depends on which method goes first
+
+Originally only range search listed other orbits that fit as well, so the warning was lost if
+collocation went first. Now, on any arc shorter than 2 days observed from Earth's center, a run whose IOD
+method listed no alternatives repeats range search's multi-start search (`run.check_ambiguity`, a few
+seconds on a short arc) and compares. Re-run of the arc study with collocation first:
+
+| Arc | Converged | Wrong but passed 3σ | ...flagged, true orbit listed |
+|---|---|---|---|
+| 8 days, 5 and 9 obs (all noise levels) | 60/60 | 0 | — (check not run) |
+| 1 day, 5 obs (1/10/100″) | 20/30 | 10 | 10 |
+| 6 hours, 5 obs (1/10/100″) | 19/30 | 11 | 11 |
+
+So either order is now safe on short arcs. Range search first still converges more often there (24/30 and
+22/30), and collocation first is faster on easy cases. The choice of order is down to that trade-off.
+
 ## How much to trust these numbers
 
 - **Settings were chosen on the reported cases.** These were chosen by looking at some of the same

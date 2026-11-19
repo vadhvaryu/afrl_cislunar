@@ -113,7 +113,7 @@ def run_case(job: dict) -> dict:
     from od_stack.sources import select_observations
     from od_stack.synthetic import generate
 
-    from od_stack.run import determine
+    from od_stack.run import check_ambiguity, determine
 
     row = {k: job.get(k) for k in ("orbit", "arc", "noise_arcsec", "seed", "method")}
     cfg = prepare(config_for(job["arc"], job["noise_arcsec"], job["seed"], job["method"], job.get("orbit")))
@@ -130,6 +130,7 @@ def run_case(job: dict) -> dict:
         t0 = time.perf_counter()
         try:
             x_iod, x0, used, attempts = determine(cfg, sys_, obs, iod, estimator)
+            check_ambiguity(cfg, sys_, obs, x0)            # as run() does, on short arcs
         except EstimationFailure as e:
             # "IOD ran" if any method produced a state, even if its fit was then rejected
             ran = "(estimation)" in str(e)

@@ -136,7 +136,7 @@ def quality_warnings(cfg: dict, obs, x0) -> list[str]:
     warnings = []
     arc_days = float(obs.t.max() - obs.t.min()) / DAY
     geocenter = not np.any(np.linalg.norm(obs.observer, axis=1) > 1)
-    if arc_days < SHORT_ARC_DAYS and geocenter:
+    if short_geocentric_arc(obs):
         warnings.append(f"The observations span only {arc_days:.2g} days from Earth's center, so the distance to the "
                         "object is poorly determined: in testing, arcs of 1 day or less often gave orbits thousands of "
                         "km off that still fit the angles. Treat this orbit as uncertain; longer arcs help.")
@@ -153,6 +153,41 @@ def quality_warnings(cfg: dict, obs, x0) -> list[str]:
         warnings.append("The fit's uncertainty (covariance) could not be computed. This usually means the "
                         "observations do not pin down the orbit; treat the result as unreliable.")
     return warnings
+
+
+def short_geocentric_arc(obs) -> bool:
+    return (float(obs.t.max() - obs.t.min()) / DAY < SHORT_ARC_DAYS
+            and not np.any(np.linalg.norm(obs.observer, axis=1) > 1))
+
+
+def check_ambiguity(cfg: dict, sys: EarthMoonSystem, obs, x0) -> str | None:
+    """On a short arc, look for other orbits that fit the angles as well as the chosen one, whichever IOD
+    method produced it. Range search lists them as it goes; for any other method, run range search's
+    multi-start search once more (a few seconds on a short arc) and compare. Adds info.alternatives;
+    returns a note, or None when nothing needed doing."""
+    if not short_geocentric_arc(obs) or "alternatives" in (x0.info or {}):
+        return None
+    from .iod import RangeSearch
+    try:
+        rs = build_iod(cfg, sys, "range_search").estimate(obs)
+    except Exception as e:                       # the check is extra; never fail the run over it
+        return f"ambiguity check skipped: {_reason(e)}"
+    if abs(rs.t - x0.t) > 1.0:
+        return "ambiguity check skipped: the IOD epoch differs from range search's"
+    n = 2 * len(obs)
+    found = [(np.asarray(a["position_m"]), np.asarray(a["velocity_m_s"]), a["rms_sigma"])
+             for a in rs.info.get("alternatives", [])]
+    if rs.info.get("polished"):
+        found.insert(0, (rs.r, rs.v, float(np.sqrt(rs.info["polished_cost"] / n))))
+    alternatives, seen = [], [x0.r]
+    for r, v, rms in found:
+        if rms > RangeSearch.ACCEPT_RMS_SIGMA or any(np.linalg.norm(r - q) <= RangeSearch.DISTINCT_KM * 1e3 for q in seen):
+            continue
+        seen.append(r)
+        alternatives.append({"position_m": r.tolist(), "velocity_m_s": v.tolist(), "rms_sigma": float(rms),
+                             "distance_from_chosen_km": float(np.linalg.norm(r - x0.r) / 1e3)})
+    x0.info["alternatives"] = alternatives
+    return f"short arc: checked for other orbits that fit as well with range search ({len(alternatives)} found)"
 
 
 def provenance() -> dict:
@@ -217,6 +252,7 @@ def run(user_cfg: dict, make_files: bool = True) -> dict:
     notes = [n for n in [size_collocation_mesh(cfg, obs)] if n]
     iod, estimator, prop = build_stages(cfg, sys)
     x_iod, x0, iod, attempts = determine(cfg, sys, obs, iod, estimator)   # 3-6  IOD -> BLS (with fallbacks)
+    notes += [n for n in [check_ambiguity(cfg, sys, obs, x0)] if n]
     est = prop.propagate(x0, t_out)                           # 7-8  propagator -> Orbit(t)
 
     truth = truth_at(t_out) if truth_at else None

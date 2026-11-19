@@ -187,6 +187,29 @@ def test_short_arc_reports_a_covariance_and_a_warning(tmp_path):
     assert min(np.linalg.norm(np.array(a["position_m"]) - true_r) for a in alternatives) < 3e3 * s["sigma_position_km"]
 
 
+def test_short_arc_ambiguity_is_checked_whichever_iod_goes_first(tmp_path):
+    """Collocation first: it lists no alternatives itself, so the run checks with range search."""
+    _orekit()
+    c = scenario(tmp_path, iod={"method": "collocation", "fallback": []})
+    c["simulation"] = {"observations": {"times_days": [3, 3.25, 3.5, 3.75, 4]}}
+    c["determination"]["estimator"] = {"method": "orekit_bls"}
+    s = run(c, make_files=False)
+    assert s["iod"] == "collocation" and s["info"]["alternatives"]
+    assert any("fit the angles about as well" in w for w in s["warnings"])
+    assert any("checked for other orbits" in n for n in s["notes"])
+    cfg = prepare(c)
+    _, truth = generate(cfg["simulation"], EarthMoonSystem())
+    true_r = truth.at(np.array([s["epoch_days"] * 86400])).r[0]
+    chosen = s["position_error_km"]
+    nearest_alt = min(np.linalg.norm(np.array(a["position_m"]) - true_r) / 1e3 for a in s["info"]["alternatives"])
+    assert min(chosen, nearest_alt) < 3 * s["sigma_position_km"]       # the true orbit is the chosen one or listed
+
+
+def test_no_ambiguity_check_on_long_arcs(tmp_path):
+    s = run(scenario(tmp_path, iod={"method": "collocation", "fallback": []}), make_files=False)
+    assert "alternatives" not in s["info"] and not s["notes"]
+
+
 def test_summary_records_attempts_and_provenance(tmp_path):
     s = run(scenario(tmp_path), make_files=False)
     assert s["attempts"] == [{"iod": "range_search", "ok": True, "rms_normalized_residual": None}]

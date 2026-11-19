@@ -171,6 +171,10 @@ trajectory). Collocation also needs about 10 mesh nodes per day of observation a
 Once the observation times are known, a lower `nodes` (or the default 80, when collocation is a
 fallback on a longer arc) is raised to that, and `summary.json` says so under `notes`.
 
+On an arc shorter than 2 days from Earth's center, a run whose IOD method did not itself look for other
+orbits that fit as well (any method but range search) runs range search's multi-start search once more
+and lists what it finds under `info.alternatives`; `notes` says so.
+
 `summary.json` also carries `warnings`, in plain language, when the result should not be taken at
 face value: an arc shorter than 2 days from Earth's center, another orbit that fits the angles
 about as well, or a covariance that could not be computed. The covariance is computed with a
