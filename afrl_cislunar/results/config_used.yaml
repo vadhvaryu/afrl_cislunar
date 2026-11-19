@@ -1,0 +1,70 @@
+system:
+  mu: 0.0121505
+  du_km: 384338.0
+  tu_s: 375099.0
+data:
+  source: csv
+  observations: data/synthetic_obs.csv
+  truth: data/synthetic_truth.csv
+  noise_arcsec: 10
+  noise_seed: 0
+  observer: from_file
+  use_obs: all
+measurements:
+  type: angular_radec
+  sigma_arcsec: from_file
+  station_offset_m: 1.0
+iod:
+  method: range_search
+  epoch_index: 2
+  range_search:
+    range_km:
+    - 150000
+    - 650000
+    - 10000
+    range_rate_m_s:
+    - -800
+    - 800
+    - 50
+  orekit:
+    obs_indices:
+    - 0
+    - 2
+    - 4
+    range_guess_km:
+    - 350000
+    - 350000
+  truth_plus_error:
+    position_error_km: 1000
+    velocity_error_m_s: 10
+    seed: 0
+orbit:
+  type: cartesian
+propagator_builder:
+  force_model: cr3bp
+  integrator: dormand_prince_853
+  min_step_s: 0.001
+  max_step_s: 3600
+  position_tolerance_m: 0.01
+  position_scale_m: 1.0
+estimation:
+  method: orekit_bls
+  optimizer: levenberg_marquardt
+  max_iterations: 50
+  max_evaluations: 100
+  convergence_threshold: 0.001
+  covariance: true
+propagator:
+  method: orekit_cr3bp
+prediction:
+  start_days: null
+  end_days: null
+  points: 800
+results:
+  dir: results
+  plot: true
+  csv: true
+  summary: true
+  save_config: true
+orekit:
+  data_path: null

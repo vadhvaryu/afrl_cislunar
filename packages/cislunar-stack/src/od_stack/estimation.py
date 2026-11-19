@@ -45,11 +45,13 @@ class OrekitBatchLS:
     def __init__(self, sys: EarthMoonSystem, orekit_data: str | None = None, max_iterations: int = 50,
                  max_evaluations: int = 100, convergence_threshold: float = 1e-3,
                  optimizer: str = "levenberg_marquardt", covariance: bool = True,
-                 builder: dict | None = None, orbit_type: str = "cartesian", station_offset_m: float = 1.0, **_):
+                 builder: dict | None = None, orbit_type: str = "cartesian", station_offset_m: float = 1.0,
+                 observer: dict | None = None, **_):
         self.sys = sys
         self.max_iter, self.max_eval, self.threshold = int(max_iterations), int(max_evaluations), float(convergence_threshold)
         self.optimizer, self.want_cov = optimizer, bool(covariance)
         self.builder_settings, self.orbit_type, self.station_offset_m = builder or {}, orbit_type, float(station_offset_m)
+        self.observer = observer or {"type": "geocenter", "position_km": [0.0, 0.0, 0.0]}
         start_orekit(orekit_data)
 
     def _optimizer(self):
@@ -80,13 +82,19 @@ class OrekitBatchLS:
         from jpype import JArray, JDouble
         from org.orekit.estimation.measurements import AngularRaDec, ObservableSatellite
 
-        from .orekit_models import frame_and_epoch, geocenter_station
+        from .orekit_models import frame_and_epoch, observer_positions, observer_station
 
-        if np.any(np.linalg.norm(obs.observer, axis=1) > 1.0):
-            raise NotImplementedError("Only an observer at Earth's center is supported so far; "
-                                      "ground stations need a GroundStation per observer position.")
+        # The station Orekit models must be where the observations were taken from.
+        expected = observer_positions(self.observer, obs.t)
+        mismatch = float(np.max(np.linalg.norm(expected - obs.observer, axis=1)))
+        if mismatch > 10.0:
+            kind = self.observer.get("type", "geocenter")
+            raise EstimationFailure(
+                f"the observer positions in the observations are up to {mismatch / 1e3:,.1f} km "
+                f"from the configured observer ({kind}). Set simulation.observer (and system.epoch_utc for "
+                "a ground site) to where the observations were taken.")
         frame, t0 = frame_and_epoch()
-        station, sat = geocenter_station(self.station_offset_m), ObservableSatellite(0)
+        station, sat = observer_station(self.observer, self.station_offset_m), ObservableSatellite(0)
         out = []
         for t, ra, dec, s in zip(obs.t, obs.ra, obs.dec, obs.sigma):
             ra = math.atan2(math.sin(ra), math.cos(ra))     # same branch Orekit uses

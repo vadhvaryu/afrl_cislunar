@@ -62,6 +62,7 @@ DEFAULTS: dict = {
     "simulation": {**copy.deepcopy(SCHEMA["simulation"]), "seed": 1},
     "evaluation": {"enabled": True},
     "run": {"name": "simulation", "seed": 1},
+    "reference": {"epoch_utc": None},
 }
 
 CHOICES = {
@@ -172,6 +173,7 @@ def prepare(user_cfg: dict) -> dict:
         sim = copy.deepcopy(cfg["simulation"])
         seed = sim.pop("seed")
         normalize({"schema_version": 1, "simulation": sim, "run": {"seed": seed},
+                   "system": {"epoch_utc": cfg["reference"]["epoch_utc"]},
                    "determination": {"iod": {"method": "range_search"}}})
         if cfg["iod"]["method"] == "truth_plus_error":
             problems.append("truth_plus_error is not supported with generated input")

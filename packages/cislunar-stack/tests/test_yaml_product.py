@@ -114,14 +114,37 @@ def test_synthetic_then_csv_without_truth_exports_and_replays(tmp_path, monkeypa
     assert replay["data"]["truth"] is None
 
 
-def test_bad_observer_combination_fails_before_java(tmp_path, monkeypatch):
+def test_ground_site_needs_epoch_and_fails_before_java(tmp_path, monkeypatch):
     import od_stack.run as runner
     monkeypatch.setattr(runner, "build_stages", lambda *args: pytest.fail("Must fail before constructing Orekit"))
     cfg = scenario(tmp_path)
-    cfg["simulation"] = {"observer": {"type": "fixed_emi", "position_km": [10, 0, 0]}}
-    cfg["determination"]["estimator"]["method"] = "orekit_bls"
-    with pytest.raises(ConfigError, match="geocenter"):
+    cfg["simulation"] = {"observer": {"type": "ground_site", "latitude_deg": 20.7, "longitude_deg": -156.3}}
+    with pytest.raises(ConfigError, match="epoch_utc"):
         run(cfg)
+
+
+@pytest.mark.parametrize("observer,match", [
+    ({"type": "ground_site", "latitude_deg": 95, "longitude_deg": 0}, "latitude"),
+    ({"type": "ground_site", "latitude_deg": 20, "longitude_deg": -156, "position_km": [1, 0, 0]}, "position_km"),
+    ({"type": "geocenter", "latitude_deg": 20, "longitude_deg": 10}, "only used with"),
+    ({"type": "satellite"}, "ground_site"),
+])
+def test_bad_observer_settings_are_rejected(tmp_path, observer, match):
+    cfg = scenario(tmp_path)
+    cfg["system"] = {"epoch_utc": "2026-11-19T08:00:00Z"}
+    cfg["simulation"] = {"observer": observer}
+    with pytest.raises(ConfigError, match=match):
+        prepare(cfg)
+
+
+def test_epoch_is_kept_as_text(tmp_path):
+    from datetime import datetime, timezone
+    cfg = scenario(tmp_path)
+    cfg["system"] = {"epoch_utc": datetime(2026, 11, 19, 8, tzinfo=timezone.utc)}   # how YAML reads it
+    assert prepare(cfg)["reference"]["epoch_utc"] == "2026-11-19T08:00:00Z"
+    cfg["system"] = {"epoch_utc": "next tuesday"}
+    with pytest.raises(ConfigError, match="epoch_utc"):
+        prepare(cfg)
 
 
 def test_output_cannot_escape_bind_mount(tmp_path, monkeypatch):

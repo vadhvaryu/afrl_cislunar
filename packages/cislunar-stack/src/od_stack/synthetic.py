@@ -34,13 +34,19 @@ class SyntheticTruth:
         return Trajectory(t=t, r=np.array([r for r, v in rv]), v=np.array([v for r, v in rv]), label="Truth")
 
 
-def generate(settings, system):
-    """Return observations and a truth evaluator; truth never enters the estimator."""
+def generate(settings, system, observer_at=None):
+    """Return observations and a truth evaluator; truth never enters the estimator.
+
+    observer_at(t) -> (N, 3) EMI positions [m] gives a moving observer (a ground site, see
+    orekit_models.observer_positions); otherwise the fixed position_km is used."""
     truth = SyntheticTruth(settings["truth"], system)
     t = np.asarray(settings["observations"]["times_days"], dtype=float) * 86400
     trajectory = truth.at(t)
-    position = np.asarray(settings["observer"]["position_km"]) * 1000
-    observers = np.broadcast_to(position, trajectory.r.shape).copy()
+    if observer_at is not None:
+        observers = np.asarray(observer_at(t), dtype=float)
+    else:
+        position = np.asarray(settings["observer"]["position_km"]) * 1000
+        observers = np.broadcast_to(position, trajectory.r.shape).copy()
     delta = trajectory.r - observers
     ranges = np.linalg.norm(delta, axis=1)
     if np.any(ranges <= 0):

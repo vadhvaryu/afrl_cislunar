@@ -28,7 +28,7 @@ simulation:                 # used when input.source is synthetic
       rtol: 1.0e-12
       atol: 1.0e-12
   observer:
-    type: geocenter          # fixed_emi also available with estimation disabled
+    type: geocenter          # fixed_emi, or ground_site (see scenarios/ground_site)
     position_km: [0, 0, 0]
   observations:
     type: angular_radec

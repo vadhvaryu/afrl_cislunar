@@ -9,14 +9,16 @@ SCHEMA = {
     "schema_version": 1,
     "run": {"name": "simulation", "seed": 1},
     "system": {"model": "earth_moon_cr3bp", "mu": 0.0121505,
-               "distance_unit_km": 384338.0, "time_unit_s": 375099.0},
+               "distance_unit_km": 384338.0, "time_unit_s": 375099.0, "epoch_utc": None},
     "input": {"source": "synthetic", "observations": None, "truth": None},
     "simulation": {
         "truth": {"dynamics": "cr3bp", "epoch_days": 0.0,
                   "initial_state": {"frame": "barycentric_rotating", "units": "nondimensional",
                                     "values": [0.872763, 0.0, 0.190505, 0.0, 0.235988, 0.0]},
                   "integrator": {"method": "DOP853", "rtol": 1e-12, "atol": 1e-12}},
-        "observer": {"type": "geocenter", "position_km": [0.0, 0.0, 0.0]},
+        "observer": {"type": "geocenter", "position_km": [0.0, 0.0, 0.0],
+                     "latitude_deg": None, "longitude_deg": None, "altitude_m": 0.0,
+                     "min_elevation_deg": 10.0},
         "observations": {"type": "angular_radec", "times_days": [0, 2, 4, 6, 8],
                          "noise": {"distribution": "gaussian", "sigma_arcsec": 10.0}},
     },
@@ -112,9 +114,34 @@ def normalize(config):
     if (sim["observations"]["type"] != "angular_radec" or noise["distribution"] != "gaussian"
             or not finite_number(noise["sigma_arcsec"]) or noise["sigma_arcsec"] < 0):
         raise ConfigError("Synthetic observations require angular_radec, gaussian noise, and nonnegative sigma_arcsec")
+    epoch = system["epoch_utc"]
+    if epoch is not None:
+        from .frames import parse_epoch
+        try:
+            # YAML reads an unquoted date as a datetime; keep one plain text form everywhere.
+            epoch = parse_epoch(epoch).isoformat().replace("+00:00", "Z")
+        except (TypeError, ValueError):
+            raise ConfigError("system.epoch_utc must be a UTC date and time like 2026-11-20T08:00:00Z, or null") from None
     observer = sim["observer"]
-    if observer["type"] not in ("geocenter", "fixed_emi"):
-        raise ConfigError("simulation.observer.type must be geocenter or fixed_emi")
+    if observer["type"] not in ("geocenter", "fixed_emi", "ground_site"):
+        raise ConfigError("simulation.observer.type must be geocenter, fixed_emi or ground_site")
+    if observer["type"] == "ground_site":
+        if epoch is None:
+            raise ConfigError("A ground_site observer needs system.epoch_utc (the date and time of t = 0), "
+                              "so Earth's rotation is known")
+        lat, lon, alt = observer["latitude_deg"], observer["longitude_deg"], observer["altitude_m"]
+        if not (finite_number(lat) and -90 <= lat <= 90):
+            raise ConfigError("simulation.observer.latitude_deg must be between -90 and 90")
+        if not (finite_number(lon) and -180 <= lon <= 360):
+            raise ConfigError("simulation.observer.longitude_deg must be between -180 and 360 (east positive)")
+        if not (finite_number(alt) and -500 <= alt <= 10000):
+            raise ConfigError("simulation.observer.altitude_m must be between -500 and 10000 m")
+        if any(observer["position_km"]):
+            raise ConfigError("ground_site uses latitude/longitude/altitude; set position_km: [0, 0, 0]")
+    elif observer["latitude_deg"] is not None or observer["longitude_deg"] is not None:
+        raise ConfigError("latitude_deg/longitude_deg are only used with observer type ground_site")
+    if not (finite_number(observer["min_elevation_deg"]) and -90 <= observer["min_elevation_deg"] < 90):
+        raise ConfigError("simulation.observer.min_elevation_deg must be between -90 and 90")
     if (not isinstance(observer["position_km"], list) or len(observer["position_km"]) != 3
             or not all(map(finite_number, observer["position_km"]))):
         raise ConfigError("simulation.observer.position_km must contain three finite numbers")
@@ -161,6 +188,7 @@ def normalize(config):
         "system": {"mu": system["mu"], "du_km": system["distance_unit_km"], "tu_s": system["time_unit_s"]},
         "data": {"source": inp["source"], "observations": inp["observations"], "truth": inp["truth"]},
         "simulation": {**copy.deepcopy(sim), "seed": c["run"]["seed"]},
+        "reference": {"epoch_utc": epoch},
         "evaluation": c["evaluation"],
         "run": c["run"],
         "iod": {"method": iod["method"], "epoch_index": iod["epoch_index"], block: iod_options},

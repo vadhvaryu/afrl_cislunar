@@ -46,7 +46,7 @@ def build_stages(cfg: dict, sys: EarthMoonSystem):
     ecfg = {k: v for k, v in cfg["estimation"].items() if k != "method"}
     estimator = ESTIMATORS[cfg["estimation"]["method"]](
         sys, orekit_data=orekit_data, builder=builder, orbit_type=cfg["orbit"]["type"],
-        station_offset_m=cfg["measurements"]["station_offset_m"], **ecfg)
+        station_offset_m=cfg["measurements"]["station_offset_m"], observer=cfg["simulation"]["observer"], **ecfg)
 
     prop = PROPAGATORS[cfg["propagator"]["method"]](sys, orekit_data=orekit_data, builder=builder)
     return iod, estimator, prop
@@ -73,20 +73,49 @@ def validate_observations(obs, cfg):
     if cfg["iod"]["method"] == "range_search" and np.any(obs.sigma <= 0):
         raise ConfigError("range_search requires strictly positive angular uncertainties")
     if cfg["estimation"]["method"] == "orekit_bls":
-        if np.any(np.linalg.norm(obs.observer, axis=1) > 1):
-            raise ConfigError("orekit_bls currently requires a geocenter observer")
         if np.any(obs.sigma <= 0):
             raise ConfigError("orekit_bls requires strictly positive angular uncertainties")
+
+
+def check_visibility(observer: dict, t_s, r_emi) -> list:
+    """Elevations [deg] of the object at each observation time; a ground site cannot see it
+    below observer.min_elevation_deg, so stop with a clear list instead of using fake data."""
+    from .orekit_models import elevations_deg
+
+    elev = elevations_deg(observer, t_s, r_emi)
+    limit = observer["min_elevation_deg"]
+    low = [f"day {t / DAY:g}: {e:.1f} deg" for t, e in zip(t_s, elev) if e < limit]
+    if low:
+        raise ConfigError(
+            f"The object is below the site's minimum elevation ({limit:g} deg) at {len(low)} of {len(elev)} "
+            f"observation times ({'; '.join(low)}). Change simulation.observations.times_days or "
+            "system.epoch_utc so every observation happens while the object is above the horizon.")
+    return [round(float(e), 2) for e in elev]
 
 
 def run(user_cfg: dict, make_files: bool = True) -> dict:
     cfg = prepare(user_cfg)
     sys = EarthMoonSystem(**cfg["system"])
 
+    observer = cfg["simulation"]["observer"]
+    epoch = cfg["reference"]["epoch_utc"]
+    from .orekit_models import configure_reference
+    if epoch is not None:
+        from .orekit_setup import start_orekit
+        start_orekit(cfg["orekit"]["data_path"])
+    configure_reference(epoch)          # the calendar date of t = 0 (None: legacy EMI-as-GCRF)
+
     truth_at = None
+    elevations = None
     if cfg["data"]["source"] == "synthetic":
         from .synthetic import generate
-        obs, generated_truth = generate(cfg["simulation"], sys)
+        observer_at = None
+        if observer["type"] == "ground_site":
+            from .orekit_models import observer_positions
+            observer_at = lambda times: observer_positions(observer, times)
+        obs, generated_truth = generate(cfg["simulation"], sys, observer_at)
+        if observer["type"] == "ground_site":
+            elevations = check_visibility(observer, obs.t, generated_truth.at(obs.t).r)
         obs = select_observations(obs, cfg)
         if cfg["evaluation"]["enabled"]:
             truth_at = generated_truth.at
@@ -121,6 +150,13 @@ def run(user_cfg: dict, make_files: bool = True) -> dict:
                                  prop.propagate(x0, obs.t), truth_at(obs.t)))
     summary.update(iod=iod.name, estimator=estimator.name, propagator=prop.name,
                    n_observations=len(obs), prediction_days=[float(t_out[0] / DAY), float(t_out[-1] / DAY)])
+    summary["observer"] = {"type": observer["type"], "epoch_utc": epoch}
+    if observer["type"] == "ground_site":
+        summary["observer"].update({k: observer[k] for k in ("latitude_deg", "longitude_deg", "altitude_m")})
+    elif observer["type"] == "fixed_emi":
+        summary["observer"]["position_km"] = observer["position_km"]
+    if elevations is not None:
+        summary["observer"]["elevation_deg"] = elevations
 
     r = cfg["results"]
     if make_files:

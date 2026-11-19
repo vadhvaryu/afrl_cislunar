@@ -78,10 +78,10 @@ accepts native absolute paths.
 | Section | Purpose |
 |---|---|
 | `run` | Run name and synthetic random seed |
-| `system` | Earth-Moon CR3BP mass ratio and distance/time units |
+| `system` | Earth-Moon CR3BP mass ratio and distance/time units; optional `epoch_utc` (calendar date/time of t = 0) |
 | `input` | `synthetic` generation or `csv` observations; optional truth file |
 | `simulation.truth` | Initial state, its epoch, truth model and integration tolerances |
-| `simulation.observer` | `geocenter` or a fixed position in the synthetic EMI frame |
+| `simulation.observer` | `geocenter`, `fixed_emi` (a point fixed in EMI) or `ground_site` (latitude, longitude, altitude on the rotating Earth) |
 | `simulation.observations` | Explicit observation schedule, RA/Dec noise and uncertainty |
 | `determination.iod` | Method, epoch observation index and method-specific options |
 | `determination.estimator` | `orekit_bls` or `none`, with method-specific options |
@@ -149,14 +149,55 @@ Truth-free CSV runs still write states, trajectories, summaries, configurations,
 and optional plots. Reusing an output directory replaces same-named run files;
 use a distinct `output.directory` for experiments you want to retain.
 
+## Observer location: Earth's center, a fixed point, or a ground site
+
+```yaml
+system:
+  epoch_utc: 2026-11-19T08:00:00Z   # calendar date/time of t = 0; required for ground_site
+simulation:
+  observer:
+    type: ground_site        # geocenter | fixed_emi | ground_site
+    latitude_deg: 20.7083    # north positive
+    longitude_deg: -156.2571 # east positive
+    altitude_m: 3058         # above the WGS-84 ellipsoid
+    min_elevation_deg: 10    # lowest usable elevation
+    position_km: [0, 0, 0]   # fixed_emi only
+```
+
+See `scenarios/ground_site/config.yaml` (AFRL Maui Optical Site, observing at night).
+
+- **Epoch and frames.** Without `epoch_utc` the stack behaves as before: EMI is
+  handed to Orekit labeled as GCRF with t0 = J2000, which is exact for observers at
+  the geocenter or fixed in EMI. With `epoch_utc`, EMI is placed in the real sky:
+  x points at the Moon at the epoch (projected into its orbit plane), z is the Moon's
+  orbit normal, both from a low-precision analytic Moon (about 0.3 deg; no ephemeris
+  files). Orekit then converts EMI to GCRF and to the rotating Earth (ITRF). Only
+  leap seconds are bundled, so Earth-orientation corrections are zero: below a second
+  of Earth rotation, about 0.2 arcsec at lunar distance. The CR3BP dynamics are
+  unchanged; the epoch only decides where that idealized system sits in the sky.
+- **Simulation.** A ground site's EMI position is computed by Orekit at every
+  observation time, so it moves with Earth's rotation. If the object is below
+  `min_elevation_deg` at any observation time, the run stops and lists each time
+  and elevation; change `times_days` or `epoch_utc`. Sunlight and night-time
+  constraints are not modeled.
+- **IOD.** Collocation and range search use the observer positions directly.
+  Orekit's two-body Gooding/Gauss/Laplace keep their own frame (unchanged).
+- **Batch least squares.** `orekit_bls` builds an Orekit `GroundStation` for the
+  configured observer (real WGS-84 site, or a fixed point / geocenter on a
+  non-rotating sphere) and measures RA/Dec in the EMI frame. Before fitting it checks
+  that the observer positions in the observations match the configured observer
+  within 10 m, so CSV observations taken elsewhere are rejected with an explanation.
+- **Summary.** `summary.json` has an `observer` block with the site, epoch and, for
+  synthetic ground-site runs, the elevation of the object at each observation.
+
 ## Scope and validation
 
-The existing Orekit batch estimator remains geocenter-only; unsupported observer
-combinations are rejected before constructing the estimator. Zero-noise data are
-supported by collocation, but Orekit BLS requires positive uncertainty. Fixed EMI
-observers are a synthetic geometry, not rotating terrestrial ground stations.
-Real epoch/frame transforms, sequential updates, and applying reconstructed
-maneuvers downstream remain separate work. The old generator script is retained
+Zero-noise data are supported by collocation, but Orekit BLS requires positive
+uncertainty. Orekit models the light travel time of each measurement (about 1.3 s);
+the synthetic generator does not, which leaves a systematic error of under 1 km
+(below the 10 arcsec noise floor of about 19 km at lunar distance). Sequential updates,
+light-time in the simulator, sunlight/night constraints, real ephemerides, and applying
+reconstructed maneuvers downstream remain separate work. The old generator script is retained
 as a historical example; the product uses `od_stack.synthetic` instead.
 
 Bind argument construction, paths with spaces/commas, read-only inputs, output
