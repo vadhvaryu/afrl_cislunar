@@ -169,7 +169,8 @@ def test_full_pipeline_range_search_no_answer_key():
     pytest.importorskip("orekit_jpype")
     cfg = load_config("config.yaml")
     cfg["iod"]["method"] = "range_search"
-    cfg["iod"]["range_search"] = {"range_km": [200000, 500000, 20000], "range_rate_m_s": [-600, 600, 100]}
+    cfg["iod"]["range_search"] = {"range_km": [200000, 500000, 20000], "range_rate_m_s": [-600, 600, 100],
+                                  "refine": False}              # the grid alone: a rough start for BLS
     s = run(cfg, make_files=False)
     assert s["iod_position_error_km"] > 1000            # IOD alone is rough...
     assert s["position_error_km"] < 3 * s["sigma_position_km"] < 300   # ...BLS lands within its own 3 sigma

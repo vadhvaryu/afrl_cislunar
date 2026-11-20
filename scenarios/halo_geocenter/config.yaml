@@ -45,9 +45,13 @@ iod:
                               # (Orekit methods ignore this: they use the middle of obs_indices)
 
   range_search:
-    range_km: [150000, 650000, 10000]      # [min, max, step] distance from Earth at the epoch
-    range_rate_m_s: [-800, 800, 50]        # [min, max, step] speed toward/away from Earth
-                                           # smaller steps = closer guess but slower (time ~ number of grid points)
+    range_km: [150000, 650000, 20000]      # [min, max, step] distance from Earth at the epoch
+    range_rate_m_s: [-800, 800, 100]       # [min, max, step] speed toward/away from Earth
+    refine: true              # polish the best grid points with a least-squares fit of the full state
+                              # (false = the raw grid point, tens of thousands of km off)
+    candidates: 12            # grid points (in different valleys) to polish; more = better at spotting
+                              # a second orbit that fits equally well (short arcs), but slower
+    max_candidates: 20        # keep polishing up to this many until one fits the angles at the 3-sigma level
   orekit:                     # gooding / gauss / laplace
     obs_indices: [0, 2, 4]    # the 3 observations used
     range_guess_km: [350000, 350000]       # gooding only: guessed distance at the 1st and 3rd

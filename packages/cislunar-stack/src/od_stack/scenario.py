@@ -17,12 +17,15 @@ SCHEMA = {
                                     "values": [0.872763, 0.0, 0.190505, 0.0, 0.235988, 0.0]},
                   "integrator": {"method": "DOP853", "rtol": 1e-12, "atol": 1e-12}},
         "observer": {"type": "geocenter", "position_km": [0.0, 0.0, 0.0]},
-        "observations": {"type": "angular_radec", "times_days": [0, 2, 4, 6, 8],
+        "observations": {"type": "angular_radec", "times_days": [0, 2, 4, 6, 8], "light_time": True,
                          "noise": {"distribution": "gaussian", "sigma_arcsec": 10.0}},
     },
     "determination": {
         "dynamics": "cr3bp",
-        "iod": {"method": "collocation", "epoch_index": 2, "options": {}},
+        # Range search first: in the benchmarks it matched or beat collocation-first on every arc and orbit,
+        # is deterministic, and flags short arcs where another orbit fits as well
+        # (benchmarks/collocation_iod/IMPROVEMENTS.md). Collocation is the fallback.
+        "iod": {"method": "range_search", "epoch_index": 2, "options": {}, "fallback": ["collocation"]},
         "estimator": {"method": "orekit_bls", "options": {}},
         "advanced": {"orbit_type": "cartesian", "station_offset_m": 1.0,
                      "integrator": "dormand_prince_853", "min_step_s": 0.001,
@@ -33,6 +36,10 @@ SCHEMA = {
     "output": {"directory": "outputs/run", "plots": True, "observations": True},
     "runtime": {"orekit_data": None},
 }
+
+
+# The product rejects fits whose residual RMS exceeds 3 measurement sigmas (estimation.OrekitBatchLS).
+PRODUCT_RESIDUAL_GATE_SIGMA = 3.0
 
 
 def strict_merge(defaults, supplied, path=""):
@@ -112,6 +119,8 @@ def normalize(config):
     if (sim["observations"]["type"] != "angular_radec" or noise["distribution"] != "gaussian"
             or not finite_number(noise["sigma_arcsec"]) or noise["sigma_arcsec"] < 0):
         raise ConfigError("Synthetic observations require angular_radec, gaussian noise, and nonnegative sigma_arcsec")
+    if type(sim["observations"]["light_time"]) is not bool:
+        raise ConfigError("simulation.observations.light_time must be true or false")
     observer = sim["observer"]
     if observer["type"] not in ("geocenter", "fixed_emi"):
         raise ConfigError("simulation.observer.type must be geocenter or fixed_emi")
@@ -139,6 +148,7 @@ def normalize(config):
         raise ConfigError(f"Unsupported IOD method: {iod['method']}")
     estimator = det["estimator"]
     est_defaults = {k: v for k, v in DEFAULTS["estimation"].items() if k != "method"}
+    est_defaults["residual_gate_sigma"] = PRODUCT_RESIDUAL_GATE_SIGMA
     if estimator["method"] == "none" and estimator["options"]:
         raise ConfigError("estimator method none accepts no options")
     est_options = strict_merge(est_defaults, estimator["options"], "determination.estimator.options.")
@@ -163,7 +173,9 @@ def normalize(config):
         "simulation": {**copy.deepcopy(sim), "seed": c["run"]["seed"]},
         "evaluation": c["evaluation"],
         "run": c["run"],
-        "iod": {"method": iod["method"], "epoch_index": iod["epoch_index"], block: iod_options},
+        "iod": {"method": iod["method"], "epoch_index": iod["epoch_index"], block: iod_options,
+                "fallback": [f for f in iod["fallback"] if f != iod["method"]] if isinstance(iod["fallback"], list)
+                else iod["fallback"]},
         "estimation": {"method": estimator["method"], **est_options},
         "orbit": {"type": advanced["orbit_type"]},
         "measurements": {"station_offset_m": advanced["station_offset_m"]},

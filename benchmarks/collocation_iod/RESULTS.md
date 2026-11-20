@@ -12,6 +12,12 @@ short arcs (1 day, 6 hours) it is unreliable**, worse than every Part B method, 
 settings does not fix that. Recommended: make it the default for multi-day arcs, and keep a
 fallback for short arcs.
 
+> **Update, November 13:** the follow-up in [IMPROVEMENTS.md](IMPROVEMENTS.md) changes this
+> recommendation. Range search now polishes its grid points; it converged on all 100 orbit cases
+> (collocation: 42), and it became the product's first IOD method, with collocation as the fallback.
+> Short arcs where the angles fit two orbits are now flagged. The numbers below are unchanged: they
+> describe the code as it was on November 9.
+
 ## 1. Does it work in our stack?
 
 | Check | Result |

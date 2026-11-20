@@ -26,7 +26,9 @@ def scenario(tmp_path):
 
 
 def test_synthetic_reproduces_original_fixture_and_seed(tmp_path):
-    cfg = prepare(scenario(tmp_path))
+    c = scenario(tmp_path)
+    c["simulation"] = {"observations": {"light_time": False}}      # the original generator had no light time
+    cfg = prepare(c)
     obs, truth = generate(cfg["simulation"], EarthMoonSystem())
     original = load_synthetic_obs(ROOT / "scenarios/halo_geocenter/data/synthetic_obs.csv", EarthMoonSystem())
     np.testing.assert_allclose(obs.t, original.t, atol=1e-8)
@@ -44,7 +46,8 @@ def test_times_state_and_observer_come_from_yaml(tmp_path):
     c = scenario(tmp_path)
     c["simulation"] = {"truth": {"epoch_days": 2, "initial_state": {"values": [0.9, 0.1, 0.1, 0, 0.2, 0]}},
                        "observer": {"type": "fixed_emi", "position_km": [1000, 2000, 3000]},
-                       "observations": {"times_days": [2, 2.1, 2.4, 2.8], "noise": {"sigma_arcsec": 0}}}
+                       "observations": {"times_days": [2, 2.1, 2.4, 2.8], "noise": {"sigma_arcsec": 0},
+                                        "light_time": False}}
     cfg = prepare(c)
     obs, truth = generate(cfg["simulation"], EarthMoonSystem())
     np.testing.assert_allclose(obs.t / 86400, [2, 2.1, 2.4, 2.8])
@@ -52,6 +55,18 @@ def test_times_state_and_observer_come_from_yaml(tmp_path):
     expected = truth.at(obs.t).r - obs.observer
     expected /= np.linalg.norm(expected, axis=1)[:, None]
     np.testing.assert_allclose(obs.los, expected, atol=1e-15)
+
+
+def test_light_time_points_at_where_the_object_was(tmp_path):
+    c = scenario(tmp_path)
+    c["simulation"] = {"observations": {"noise": {"sigma_arcsec": 0}}}
+    cfg = prepare(c)
+    obs, truth = generate(cfg["simulation"], EarthMoonSystem())
+    rng = np.linalg.norm(truth.at(obs.t).r, axis=1)
+    emitted = truth.at(obs.t - rng / 299_792_458.0).r            # one iteration is accurate to ~micrometers
+    np.testing.assert_allclose(obs.los, emitted / np.linalg.norm(emitted, axis=1)[:, None], atol=1e-10, rtol=0)
+    shift = np.degrees(np.arccos(np.sum(obs.los * truth.at(obs.t).r / rng[:, None], axis=1))) * 3600
+    assert np.all((shift > 0.3) & (shift < 1.5))                   # ~0.6-0.8 arcsec on the halo
 
 
 @pytest.mark.parametrize("change", [
@@ -107,10 +122,12 @@ def test_synthetic_then_csv_without_truth_exports_and_replays(tmp_path, monkeypa
     output = tmp_path / "csv-results"
     for name in ("state.json", "trajectory.csv", "summary.json", "config_used.yaml", "results.png"):
         assert (output / name).is_file()
+    # Collocation's optimum is flat: a last-bit change in the angles (the CSV round trip) moved its answer by
+    # ~600 m, against an error of ~16 km. So: same answer to well within its error, not bit for bit.
     np.testing.assert_allclose(json.loads((out / "state.json").read_text())["position_m"],
-                               json.loads((output / "state.json").read_text())["position_m"], atol=10, rtol=0)
+                               json.loads((output / "state.json").read_text())["position_m"], atol=2000, rtol=0)
     replay = load_config(output / "config_used.yaml")
-    assert replay["iod"]["method"] == "collocation"
+    assert replay["iod"]["method"] == "range_search" and replay["iod"]["fallback"] == ["collocation"]
     assert replay["data"]["truth"] is None
 
 

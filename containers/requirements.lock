@@ -1,0 +1,18 @@
+# Exact Python packages installed in the product image (containers/Dockerfile), Python 3.13 on Debian
+# bookworm. Numerical versions match packages/collocation-iod/requirements.lock. Update them together.
+numpy==2.5.4
+scipy==1.18.1
+casadi==3.8.2
+orekit-jpype==13.1.9.0
+JPype1==1.7.1
+matplotlib==3.11.2
+contourpy==1.4.0
+cycler==0.12.1
+fonttools==4.68.0
+kiwisolver==1.5.1
+packaging==26.3
+pillow==13.0.0
+pyparsing==3.3.3
+python-dateutil==4.0.0
+tzdata==2026.6
+PyYAML==6.0.3

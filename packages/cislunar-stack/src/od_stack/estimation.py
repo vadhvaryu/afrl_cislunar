@@ -20,7 +20,11 @@ from .orekit_setup import start_orekit
 
 
 class EstimationFailure(RuntimeError):
-    pass
+    """The estimator found no acceptable fit. ``state`` holds the rejected fit, if there was one."""
+
+    def __init__(self, message: str, state: StateEstimate | None = None):
+        super().__init__(message)
+        self.state = state
 
 
 class NoEstimation:
@@ -45,11 +49,16 @@ class OrekitBatchLS:
     def __init__(self, sys: EarthMoonSystem, orekit_data: str | None = None, max_iterations: int = 50,
                  max_evaluations: int = 100, convergence_threshold: float = 1e-3,
                  optimizer: str = "levenberg_marquardt", covariance: bool = True,
-                 builder: dict | None = None, orbit_type: str = "cartesian", station_offset_m: float = 1.0, **_):
+                 builder: dict | None = None, orbit_type: str = "cartesian", station_offset_m: float = 1.0,
+                 residual_gate_sigma: float | None = 3.0, **_):
         self.sys = sys
         self.max_iter, self.max_eval, self.threshold = int(max_iterations), int(max_evaluations), float(convergence_threshold)
         self.optimizer, self.want_cov = optimizer, bool(covariance)
         self.builder_settings, self.orbit_type, self.station_offset_m = builder or {}, orbit_type, float(station_offset_m)
+        # A converged fit whose residual RMS (in measurement sigmas) exceeds this is a wrong local solution, not
+        # a noisy right one: correct fits stayed at or below 1.6 sigma at 1-100 arcsec noise, wrong ones were at
+        # hundreds (benchmarks/collocation_iod). None turns the check off.
+        self.gate = None if residual_gate_sigma is None else float(residual_gate_sigma)
         start_orekit(orekit_data)
 
     def _optimizer(self):
@@ -63,8 +72,11 @@ class OrekitBatchLS:
         return LevenbergMarquardtOptimizer()
 
     def _cartesian_covariance(self, estimator, fitted_orbit):
-        """6x6 covariance in x, y, z, vx, vy, vz (SI), whatever orbit type was estimated."""
-        C = estimator.getPhysicalCovariances(1e-12)
+        """6x6 covariance in x, y, z, vx, vy, vz (SI), whatever orbit type was estimated.
+        The singularity threshold is 1e-16, not Orekit's usual 1e-12: with 1 m position scaling, short arcs
+        trip 1e-12 although their normal matrix is well conditioned (condition number ~300-20,000 on 1-day
+        and 6-hour arcs), and the covariance then computed matched the actual errors (benchmarks/collocation_iod)."""
+        C = estimator.getPhysicalCovariances(1e-16)
         if self.orbit_type == "cartesian":
             return np.array([[C.getEntry(i, j) for j in range(6)] for i in range(6)])
         from org.orekit.orbits import OrbitType, PositionAngleType
@@ -100,7 +112,10 @@ class OrekitBatchLS:
         from .orekit_models import frame_and_epoch, propagator_builder
 
         frame, _ = frame_and_epoch()
-        builder = propagator_builder(self.sys, x0.t, x0.r, x0.v, self.builder_settings, self.orbit_type)
+        try:        # e.g. a hyperbolic starting state cannot be written as equinoctial elements
+            builder = propagator_builder(self.sys, x0.t, x0.r, x0.v, self.builder_settings, self.orbit_type)
+        except Exception as e:
+            raise EstimationFailure(f"{self.name}: cannot start from this state: {str(e).splitlines()[0]}") from e
         estimator = BatchLSEstimator(self._optimizer(), builder)
         estimator.setParametersConvergenceThreshold(self.threshold)
         estimator.setMaxIterations(self.max_iter)
@@ -124,8 +139,9 @@ class OrekitBatchLS:
             try:
                 cov = self._cartesian_covariance(estimator, fitted.getInitialState().getOrbit())
             except Exception:
-                cov = None    # happens at very high noise; worth investigating
-        return StateEstimate(
+                cov = None    # the observations leave some direction of the state undetermined
+        rms = float(estimator.getOptimum().getRMS())
+        fit = StateEstimate(
             t=x0.t,
             r=np.array([p.getX(), p.getY(), p.getZ()]),
             v=np.array([v.getX(), v.getY(), v.getZ()]),
@@ -134,8 +150,12 @@ class OrekitBatchLS:
             info={**x0.info, "optimizer": self.optimizer, "orbit_type": self.orbit_type,
                   "iterations": int(estimator.getIterationsCount()),
                   "evaluations": int(estimator.getEvaluationsCount()),
-                  "rms_normalized_residual": float(estimator.getOptimum().getRMS())},
+                  "rms_normalized_residual": rms, "residual_gate_sigma": self.gate},
         )
+        if self.gate is not None and not rms <= self.gate:
+            raise EstimationFailure(f"{self.name}: residual check failed: RMS {rms:.3g} sigma > {self.gate:g} sigma "
+                                    "(the fit converged to an orbit that does not match the observations)", fit)
+        return fit
 
 
 ESTIMATORS = {
