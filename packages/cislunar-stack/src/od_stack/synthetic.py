@@ -13,11 +13,26 @@ class SyntheticTruth:
     def __init__(self, settings, system):
         self.settings, self.system = settings, system
 
+    def burns(self):
+        """Impulsive burns as (rotating time, rotating nondimensional velocity change)."""
+        from .frames import rot_z
+        out = []
+        for m in self.settings.get("maneuvers") or []:
+            tau = m["time_days"] * 86400 / self.system.tu_s
+            out.append((tau, rot_z(tau).T @ np.asarray(m["delta_v_m_s"], dtype=float) / self.system.vu_ms))
+        return out
+
     def at(self, times):
         t = np.asarray(times, dtype=float)
         tau = self.system.tau(t)
         epoch = self.settings["epoch_days"] * 86400 / self.system.tu_s
         initial = np.asarray(self.settings["initial_state"]["values"], dtype=float)
+        if self.settings.get("maneuvers"):
+            from .dynamics import propagate_with_burns
+            states = propagate_with_burns(initial, epoch, tau, self.system.mu, self.burns(),
+                                          rtol=self.settings["integrator"]["rtol"], atol=self.settings["integrator"]["atol"])
+            rv = [rotating_to_emi(ti, x, self.system) for ti, x in zip(tau, states)]
+            return Trajectory(t=t, r=np.array([r for r, v in rv]), v=np.array([v for r, v in rv]), label="Truth")
         states = np.empty((len(t), 6))
         for mask, end in ((tau >= epoch, tau.max()), (tau < epoch, tau.min())):
             if not mask.any():

@@ -3,7 +3,8 @@
 Follow-up to [RESULTS.md](RESULTS.md), on branch `iod-integration-fixes`, November 13, 2026. Each
 change below came from a weakness the benchmarks showed. Each one was checked against the same
 benchmarks: 4 arcs × 3 noise levels × 10 draws, and 5 orbits × 20 draws at 10″. That process is
-also the main caveat: see [How much to trust these numbers](#how-much-to-trust-these-numbers).
+also the main caveat: see [How much to trust these numbers](#how-much-to-trust-these-numbers). A
+re-test on fresh noise draws, which no setting was chosen on, gave the same results (below).
 
 **Bottom line.**
 - **Orbit cases:** the product now converges on 100 of 100 (it was 82; the DRO went from 2/20 to
@@ -117,8 +118,24 @@ So either order is now safe on short arcs. Range search first still converges mo
   - the 1,000 km "different orbit" distance;
   - the 20,000 km × 100 m/s grid, from the DRO draws, seeds 0–2.
 
-  They were not tuned to maximize the tables, and the 8-day results do not depend on them. But the
-  short-arc detection rate has not been tested on draws held out from that choice.
+  They were not tuned to maximize the tables, and the 8-day results do not depend on them.
+- **Re-test on fresh draws (November 20).** Both product orders were run again on noise draws none of
+  those settings were chosen on: arc seeds 10–19 and orbit seeds 20–39
+  (`compare_iod.py --seeds`). The results held:
+
+  | Range search first (the default) | Original draws | Fresh draws |
+  |---|---|---|
+  | Orbit study, converged | 100/100 | 100/100 |
+  | 8-day arcs, converged | 60/60 | 60/60 |
+  | 1-day arcs, converged | 24/30 | 25/30 |
+  | 6-hour arcs, converged | 22/30 | 22/30 |
+  | Wrong fits that passed 3σ | 14, all flagged | 12, all flagged, true orbit listed every time |
+
+  - **Collocation first** also reached 100/100 on the orbit study. It converged less often on short
+    arcs: 1-day 17/30 (20/30 before) and 6-hour 15/30 (19/30 before). All 27 of its wrong fits were
+    flagged with the true orbit listed.
+  - **One 6-hour run in each order failed outright,** with an error message rather than a wrong
+    answer. That had not happened on the original draws.
 - **Settings that the numbers rest on:** the 3σ level for "fits as well" (the same as the residual
   check), and the polish limit of 40 evaluations. The limit only saves time: checked on 14 cases,
   the IOD errors were unchanged.

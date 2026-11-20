@@ -74,3 +74,80 @@ def propagate_cr3bp_stm(x0: np.ndarray, tau0: float, taus: np.ndarray, mu: float
         y = sol.sol(taus[mask]).T
         states[mask], stms[mask] = y[:, :6], y[:, 6:].reshape(-1, 6, 6)
     return states, stms
+
+
+def propagate_with_burns(x0: np.ndarray, tau0: float, taus: np.ndarray, mu: float, burns=(), partials: bool = False,
+                         rtol: float = 1e-10, atol: float = 1e-12):
+    """CR3BP propagation with impulsive burns, forward and backward from tau0.
+
+    x0 is the rotating nondimensional state at tau0 (before any burn exactly at tau0). `burns` is a list of
+    (tau_b, dv) with dv the velocity change in rotating nondimensional units (a jump in inertial velocity is the
+    same jump in rotating velocity, rotated). At a burn time the returned state is the one just after it.
+    With partials=True also returns d state / d parameters, shape (M, 6, 6 + 4K): the 6 initial-state
+    components, then 3 dv components per burn, then one burn time per burn."""
+    taus = np.asarray(taus, dtype=float)
+    burns = [(float(t), np.asarray(dv, dtype=float)) for t, dv in burns]
+    k = len(burns)
+    npar = 6 + 4 * k
+    states = np.full((len(taus), 6), np.nan)
+    sens = np.zeros((len(taus), 6, npar)) if partials else None
+    for direction in (1, -1):
+        mask = taus >= tau0 if direction == 1 else taus < tau0
+        if not mask.any():
+            continue
+        end = taus[mask].max() if direction == 1 else taus[mask].min()
+        if direction == 1:
+            order = sorted((j for j, (t, _) in enumerate(burns) if tau0 <= t <= end), key=lambda j: burns[j][0])
+        else:
+            order = sorted((j for j, (t, _) in enumerate(burns) if end <= t < tau0), key=lambda j: -burns[j][0])
+        x, P, start = np.array(x0, dtype=float), np.hstack([np.eye(6), np.zeros((6, npar - 6))]), tau0
+        stops = [burns[j][0] for j in order] + [end]
+        for s, stop in enumerate(stops):
+            if direction == 1:
+                inside = mask & (taus >= start) & ((taus < stop) if s < len(order) else (taus <= stop))
+            else:
+                inside = mask & (taus < start) & ((taus > stop) if s < len(order) else (taus >= stop))
+            if stop != start:
+                y0 = np.concatenate([x, np.eye(6).ravel()]) if partials else x
+                f = cr3bp_eom_stm if partials else cr3bp_eom
+                sol = solve_ivp(f, [start, stop], y0, args=(mu,), dense_output=True, method="DOP853", rtol=rtol, atol=atol)
+                if not sol.success:
+                    raise RuntimeError(f"CR3BP propagation failed: {sol.message}")
+                if inside.any():
+                    y = sol.sol(taus[inside]).T
+                    states[inside] = y[:, :6]
+                    if partials:
+                        sens[inside] = np.einsum("nij,jk->nik", y[:, 6:].reshape(-1, 6, 6), P)
+                yend = sol.y[:, -1]
+                x = yend[:6]
+                if partials:
+                    P = yend[6:].reshape(6, 6) @ P
+            elif inside.any():
+                states[inside] = x
+                if partials:
+                    sens[inside] = P
+            if s == len(order):
+                break
+            j = order[s]
+            dv = burns[j][1]
+            if direction == -1:                          # arriving from later: x is the post-burn state
+                at = mask & (taus == stop)
+                states[at] = x
+                if partials:
+                    sens[at] = P
+            before = np.array(cr3bp_eom(0.0, x, mu))
+            x = x.copy()
+            x[3:] += direction * dv                      # forward: x+ = x- + dv; backward: x- = x+ - dv
+            after = np.array(cr3bp_eom(0.0, x, mu))
+            if partials:
+                P = P.copy()
+                P[3:, 6 + 3 * j:9 + 3 * j] += direction * np.eye(3)
+                P[:, 6 + 3 * k + j] += (before - after)    # moving the burn later (forward) or earlier (backward)
+            start = stop
+            # observations exactly at the burn time see the post-burn state (forward)
+            if direction == 1:
+                at = mask & (taus == stop)
+                states[at] = x
+                if partials:
+                    sens[at] = P
+    return (states, sens) if partials else states

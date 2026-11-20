@@ -185,6 +185,26 @@ Every `summary.json` records `provenance`: Python, package versions, machine and
 optimizer can settle on slightly different solutions on different platforms, so compare runs made
 with the same container image.
 
+### Maneuvering targets: batch least squares with burn parameters
+
+`simulation.truth.maneuvers` adds impulsive burns to the synthetic truth, each as
+`{time_days: t, delta_v_m_s: [x, y, z]}` (velocity change in EMI axes). A coasting fit cannot match such
+data: the 3σ residual check rejects it.
+
+To determine a maneuvering orbit, run collocation in `mode: impulsive` and the `cr3bp_bls` estimator
+(see `scenarios/maneuver/config.yaml`). Collocation reports impulses at its mesh points; neighboring ones
+(within half a day) are grouped into burns, small ones dropped (`min_burn_m_s`, default 0.5, and below 30%
+of the largest). `cr3bp_bls` then fits the state at the epoch together with each burn's velocity change and,
+with `estimate_burn_times: true`, its time. It is batch least squares in the CR3BP itself (scipy, exact
+Jacobian from the state transition matrix, light time included), so it needs no Java and accepts any
+observer position. `summary.json` lists the fitted burns under `info.maneuvers`, each with its 1σ
+uncertainty, and the scipy prediction (`prediction.backend: scipy`) applies them; the Orekit prediction
+does not yet, so that combination is rejected. `maneuvers: none` makes `cr3bp_bls` a plain coasting fit.
+
+A burn adds four unknowns, so it needs more observations than a coasting orbit: the example and the
+benchmark (`benchmarks/maneuver_bls/`) use 17 over 8 days. Collocation's `hybrid` mode (continuous
+thrust) cannot be fitted this way and is rejected with `cr3bp_bls`.
+
 ## Output contract
 
 Successful product runs always export:

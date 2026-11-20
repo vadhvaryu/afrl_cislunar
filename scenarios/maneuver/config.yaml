@@ -1,0 +1,41 @@
+# A halo orbit with one impulsive burn, determined with collocation (impulsive mode) and batch least squares
+# that fits the burn. Run from the repository root:   cislunar-stack --config scenarios/maneuver/config.yaml
+schema_version: 1
+run:
+  name: maneuver_example
+  seed: 1
+
+simulation:
+  truth:
+    maneuvers:                       # impulsive burns: time and velocity change in EMI axes
+      - time_days: 3.1
+        delta_v_m_s: [3.0, -2.0, 3.0]
+  observations:
+    times_days: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8]   # a burn needs more data
+    noise:
+      sigma_arcsec: 10
+
+determination:
+  iod:
+    method: collocation
+    epoch_index: 8                   # day 4
+    options:
+      mode: impulsive                # collocation estimates impulsive burns; they seed the least-squares fit
+    fallback: []
+  estimator:
+    method: cr3bp_bls                # batch least squares in the CR3BP, with burn parameters
+    options:
+      maneuvers: from_iod            # fit the burns the IOD found (none = coasting fit)
+      estimate_burn_times: true      # also fit when each burn happened
+      min_burn_m_s: 0.5              # ignore IOD burns smaller than this
+      residual_gate_sigma: 3
+
+prediction:
+  backend: scipy                     # applies the fitted burns (the Orekit prediction does not yet)
+  start_days: 0
+  end_days: 12
+  points: 400
+
+output:
+  directory: outputs/maneuver_example
+  plots: true

@@ -188,17 +188,17 @@ def _safe(job):
                 "iod_error": f"{type(e).__name__}: {e}"[:200]}
 
 
-def jobs_for(quick: bool, study: str = "arcs", methods=None) -> list[dict]:
+def jobs_for(quick: bool, study: str = "arcs", methods=None, seeds=None) -> list[dict]:
     if study == "orbits":
         ms = methods or ("collocation", "range_search", *PRODUCTS)
         return [{"orbit": o, "arc": ORBIT_ARC, "noise_arcsec": ORBIT_NOISE, "seed": s, "method": m}
-                for o in ORBITS for s in (range(1) if quick else ORBIT_SEEDS) for m in (REFERENCE, *ms)]
-    arcs, noises, seeds = (ARCS, (10.0,), range(1)) if quick else (ARCS, NOISE_ARCSEC, SEEDS)
+                for o in ORBITS for s in (range(1) if quick else seeds or ORBIT_SEEDS) for m in (REFERENCE, *ms)]
+    arcs, noises, seeds = (ARCS, (10.0,), range(1)) if quick else (ARCS, NOISE_ARCSEC, seeds or SEEDS)
     return [{"orbit": None, "arc": a, "noise_arcsec": n, "seed": s, "method": m}
             for a in arcs for n in noises for s in seeds for m in (REFERENCE, *(methods or (*METHODS, *PRODUCTS)))]
 
 
-def run_all(out: Path, workers: int, quick: bool, study: str = "arcs", methods=None) -> list[dict]:
+def run_all(out: Path, workers: int, quick: bool, study: str = "arcs", methods=None, seeds=None) -> list[dict]:
     out.mkdir(parents=True, exist_ok=True)
     path = out / "runs.csv"
     key = lambda r: (r.get("orbit") or "", r["arc"], float(r["noise_arcsec"]), int(r["seed"]), r["method"])
@@ -207,7 +207,7 @@ def run_all(out: Path, workers: int, quick: bool, study: str = "arcs", methods=N
         with open(path, newline="") as f:
             done = list(csv.DictReader(f))
     have = {key(r) for r in done}
-    todo = [j for j in jobs_for(quick, study, methods) if key(j) not in have]
+    todo = [j for j in jobs_for(quick, study, methods, seeds) if key(j) not in have]
     print(f"{len(todo)} runs to do ({len(have)} already in {path}), {workers} workers")
     new = not path.exists()
     with open(path, "a", newline="") as f, mp.get_context("spawn").Pool(workers) as pool:
@@ -335,9 +335,11 @@ def main(argv=None) -> int:
     ap.add_argument("--study", choices=["arcs", "orbits"], default="arcs",
                     help="arcs: 4 arcs x 3 noise levels x 10 draws (baseline halo); orbits: 5 orbits x 20 draws at 10\"")
     ap.add_argument("--methods", nargs="+", help="subset of methods (the truth-started reference always runs)")
+    ap.add_argument("--seeds", nargs=2, type=int, metavar=("FIRST", "STOP"),
+                    help="noise draws range(FIRST, STOP) instead of the defaults, e.g. fresh draws for a re-test")
     a = ap.parse_args(argv)
     out = Path(a.out or ROOT / "outputs" / "benchmarks" / ("collocation_iod" + ("_orbits" if a.study == "orbits" else "")))
-    rows = grade(run_all(out, a.workers, a.quick, a.study, a.methods))
+    rows = grade(run_all(out, a.workers, a.quick, a.study, a.methods, range(*a.seeds) if a.seeds else None))
     summ = summarize(rows)
     text = markdown(summ)
     (out / "summary.md").write_text(text, encoding="utf-8")

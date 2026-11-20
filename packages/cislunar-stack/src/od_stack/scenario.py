@@ -15,7 +15,9 @@ SCHEMA = {
         "truth": {"dynamics": "cr3bp", "epoch_days": 0.0,
                   "initial_state": {"frame": "barycentric_rotating", "units": "nondimensional",
                                     "values": [0.872763, 0.0, 0.190505, 0.0, 0.235988, 0.0]},
-                  "integrator": {"method": "DOP853", "rtol": 1e-12, "atol": 1e-12}},
+                  "integrator": {"method": "DOP853", "rtol": 1e-12, "atol": 1e-12},
+                  # impulsive burns: [{time_days: 3.1, delta_v_m_s: [x, y, z]}], velocity change in EMI axes
+                  "maneuvers": []},
         "observer": {"type": "geocenter", "position_km": [0.0, 0.0, 0.0]},
         "observations": {"type": "angular_radec", "times_days": [0, 2, 4, 6, 8], "light_time": True,
                          "noise": {"distribution": "gaussian", "sigma_arcsec": 10.0}},
@@ -106,6 +108,12 @@ def normalize(config):
         raise ConfigError("simulation.truth.initial_state.values must contain six finite numbers")
     if not finite_number(sim["truth"]["epoch_days"]):
         raise ConfigError("simulation.truth.epoch_days must be finite")
+    maneuvers = sim["truth"]["maneuvers"]
+    if not isinstance(maneuvers, list) or not all(
+            isinstance(m, dict) and set(m) == {"time_days", "delta_v_m_s"} and finite_number(m["time_days"])
+            and isinstance(m["delta_v_m_s"], list) and len(m["delta_v_m_s"]) == 3
+            and all(map(finite_number, m["delta_v_m_s"])) for m in maneuvers):
+        raise ConfigError("simulation.truth.maneuvers must be a list of {time_days: t, delta_v_m_s: [x, y, z]}")
     integrator = sim["truth"]["integrator"]
     if integrator["method"] not in ("DOP853", "RK45") or not all(
         finite_number(integrator[k]) and integrator[k] > 0 for k in ("rtol", "atol")
