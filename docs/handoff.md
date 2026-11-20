@@ -35,7 +35,7 @@ The pull requests are stacked, so merge them in this order:
 |---|---|---|---|
 | vadhvaryu/afrl_cislunar#9 | `collocation-iod-testing` → `main` | Collocation IOD tested against the previous IOD methods (benchmarks only) | `benchmarks/collocation_iod/RESULTS.md` |
 | vadhvaryu/afrl_cislunar#10 | `iod-integration-fixes` → #9 | 3σ residual check, IOD fallback, configuration checks, provenance, pinned container, polished range search, short-arc warnings and alternatives, light time | `benchmarks/collocation_iod/IMPROVEMENTS.md` |
-| (to open) | `maneuver-bls` → #10 | Batch least squares with burn parameters (`cr3bp_bls`), burns in the simulation | `benchmarks/maneuver_bls/RESULTS.md` |
+| vadhvaryu/afrl_cislunar#11 | `maneuver-bls` → #10 | Batch least squares with burn parameters (`cr3bp_bls`), burns in the simulation | `benchmarks/maneuver_bls/RESULTS.md` |
 
 After a base merges, retarget the next one to `main`.
 
@@ -85,9 +85,10 @@ Two older items were never brought to `main`:
 - **Orekit's batch least squares and prediction still assume coasting.**
 - **Collocation's answer depends on the machine and on last-digit input changes** (its optimum is flat):
   about 600 m against a 16 km error. Compare runs made in the same container.
-- **Settings chosen on reported cases.** A few of range search's settings were chosen by looking at some of
-  the same noise draws that the benchmarks report: the number of starts, the "different orbit" distance
-  and the grid. Re-test them on new draws.
+- **Settings were chosen on some of the reported draws.** A few of range search's settings came from
+  looking at some of the same noise draws the benchmarks report: the number of starts, the "different
+  orbit" distance and the grid. A re-test on fresh draws gave the same results (`IMPROVEMENTS.md`), so
+  this is a minor caveat now.
 
 ## Suggested next steps
 
